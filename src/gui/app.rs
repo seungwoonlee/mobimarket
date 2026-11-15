@@ -453,12 +453,31 @@ impl eframe::App for MobiMarketApp {
                         .strong()
                         .color(Color32::from_rgb(250, 180, 40)),
                 );
-                ui.label(
-                    RichText::new("마비노기 모바일 마켓 시세 & 제작 계산기")
-                        .size(13.0)
-                        .color(Color32::GRAY),
-                );
 
+                ui.add_space(8.0);
+
+                // CLI 연결 상태 배지를 로고 바로 옆에 배치하여 좌우 균형 및 가로 공간 극대화
+                if self.cli_connected {
+                    ui.label(
+                        RichText::new(format!(
+                            "● CLI 연동됨 ({}, {})",
+                            self.character_info, self.job_name
+                        ))
+                        .color(Color32::from_rgb(100, 230, 120))
+                        .strong(),
+                    );
+                } else {
+                    if ui.small_button(RichText::new("[AI 커넥터 켜기 안내]").color(Color32::from_rgb(255, 210, 80))).clicked() {
+                        self.show_ai_connector_popup = true;
+                    }
+                    ui.label(
+                        RichText::new("● 게임 미실행 / CLI 미연동")
+                            .color(Color32::from_rgb(250, 100, 100))
+                            .strong(),
+                    );
+                }
+
+                // 우측 컨트롤 영역: 콤팩트 ComboBox로 통일하여 겹침 원천 차단
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let is_collecting = self.collector.is_collecting.load(Ordering::Relaxed);
                     if is_collecting {
@@ -494,13 +513,20 @@ impl eframe::App for MobiMarketApp {
                             .color(Color32::from_rgb(160, 200, 255)),
                     );
 
-                    // 슬라이더: 수집 주기 조절 (1분 ~ 60분, 기본 10분)
+                    ui.separator();
+
+                    // 자동 주기 ComboBox (슬라이더 대신 콤팩트 드롭다운)
                     let prev_val = self.interval_minutes;
-                    ui.add(
-                        egui::Slider::new(&mut self.interval_minutes, 1..=60)
-                            .text("자동 주기")
-                            .suffix("분"),
-                    );
+                    egui::ComboBox::from_id_salt("header_interval_combo")
+                        .selected_text(format!("주기: {}분", self.interval_minutes))
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.interval_minutes, 1, "1분");
+                            ui.selectable_value(&mut self.interval_minutes, 5, "5분");
+                            ui.selectable_value(&mut self.interval_minutes, 10, "10분");
+                            ui.selectable_value(&mut self.interval_minutes, 30, "30분");
+                            ui.selectable_value(&mut self.interval_minutes, 60, "60분");
+                        });
                     if prev_val != self.interval_minutes {
                         let new_sec = self.interval_minutes as u64 * 60;
                         self.collector
@@ -510,57 +536,23 @@ impl eframe::App for MobiMarketApp {
 
                     ui.separator();
 
-                    // 조회 기간 슬라이더 & 프리셋 버튼
-                    ui.horizontal(|p_ui| {
-                        p_ui.label(
-                            RichText::new("조회 기간:")
-                                .size(12.0)
-                                .color(Color32::from_rgb(180, 200, 220)),
-                        );
-                        p_ui.add(
-                            egui::Slider::new(&mut self.period_days, 1..=30)
-                                .suffix("일")
-                                .show_value(true),
-                        );
-                        for (d, label) in &[
-                            (1, "1일"),
-                            (3, "3일"),
-                            (7, "7일"),
-                            (14, "14일"),
-                            (30, "30일"),
-                            (0, "전체"),
-                        ] {
-                            let is_active = self.period_days == *d;
-                            if p_ui.selectable_label(is_active, *label).clicked() {
-                                self.period_days = *d;
-                            }
-                        }
-                    });
-
-                    ui.separator();
-
-                    // CLI 연결 상태 배지 (문자 깨짐 없는 ● 기호 사용)
-                    if self.cli_connected {
-                        ui.label(
-                            RichText::new(format!(
-                                "● CLI 연동됨 ({}, {})",
-                                self.character_info, self.job_name
-                            ))
-                            .color(Color32::from_rgb(100, 230, 120))
-                            .strong(),
-                        );
+                    // 조회 기간 ComboBox (슬라이더 + 6개 버튼 대신 콤팩트 드롭다운)
+                    let period_text = if self.period_days == 0 {
+                        "기간: 전체".to_string()
                     } else {
-                        ui.horizontal(|ui| {
-                            if ui.small_button(RichText::new("[AI 커넥터 켜기 안내]").color(Color32::from_rgb(255, 210, 80))).clicked() {
-                                self.show_ai_connector_popup = true;
-                            }
-                            ui.label(
-                                RichText::new("● 게임 미실행 / CLI 미연동")
-                                    .color(Color32::from_rgb(250, 100, 100))
-                                    .strong(),
-                            );
+                        format!("기간: {}일", self.period_days)
+                    };
+                    egui::ComboBox::from_id_salt("header_period_combo")
+                        .selected_text(period_text)
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.period_days, 1, "최근 1일");
+                            ui.selectable_value(&mut self.period_days, 3, "최근 3일");
+                            ui.selectable_value(&mut self.period_days, 7, "최근 7일");
+                            ui.selectable_value(&mut self.period_days, 14, "최근 14일");
+                            ui.selectable_value(&mut self.period_days, 30, "최근 30일");
+                            ui.selectable_value(&mut self.period_days, 0, "전체 기간");
                         });
-                    }
                 });
             });
 
@@ -684,11 +676,13 @@ impl MobiMarketApp {
     /// 탭 1: 주요 아이템 시세 뷰
     fn view_market_prices(&mut self, ui: &mut egui::Ui) {
         let total_height = ui.available_height();
+        let total_width = ui.available_width();
+        let left_panel_width = (total_width * 0.48).clamp(580.0, 720.0);
 
         ui.horizontal(|ui| {
-            // 좌측 패널 (너비 440px로 확장하여 품목명 + 현재가 + 기간최저 + 기간최고 4열 HTS 배치)
+            // 좌측 패널 (전체 너비의 약 50% 수준으로 대폭 확장하여 뷰 밸런스 및 품목명 가독성 확보)
             ui.vertical(|ui| {
-                ui.set_width(440.0);
+                ui.set_width(left_panel_width);
 
                 // 1. 그룹 선택 버튼바
                 ui.label(RichText::new("품목 그룹 선택").size(12.0).color(Color32::GRAY));
@@ -845,7 +839,7 @@ impl MobiMarketApp {
                 let h_base_x = h_rect.min.x;
                 let h_center_y = h_rect.center().y;
 
-                // 컬럼 1: 품목명
+                // 컬럼 1: 품목명 (여유 너비 ~350px 확보)
                 ui.painter().text(
                     egui::pos2(h_base_x + 8.0, h_center_y),
                     egui::Align2::LEFT_CENTER,
@@ -855,7 +849,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 2: 현재가
                 ui.painter().text(
-                    egui::pos2(h_base_x + 225.0, h_center_y),
+                    egui::pos2(h_base_x + 360.0, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "현재가",
                     egui::FontId::proportional(11.0),
@@ -863,7 +857,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 3: 기간 최저
                 ui.painter().text(
-                    egui::pos2(h_base_x + 305.0, h_center_y),
+                    egui::pos2(h_base_x + 455.0, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "기간 최저",
                     egui::FontId::proportional(11.0),
@@ -871,7 +865,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 4: 기간 최고
                 ui.painter().text(
-                    egui::pos2(h_base_x + 385.0, h_center_y),
+                    egui::pos2(h_base_x + 550.0, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "기간 최고",
                     egui::FontId::proportional(11.0),
@@ -931,8 +925,8 @@ impl MobiMarketApp {
                                 let mut del_clicked = false;
                                 if is_deletable {
                                     let del_rect = egui::Rect::from_min_max(
-                                        egui::pos2(base_x + 392.0, rect.min.y + 3.0),
-                                        egui::pos2(base_x + 418.0, rect.max.y - 3.0),
+                                        egui::pos2(base_x + 558.0, rect.min.y + 3.0),
+                                        egui::pos2(base_x + 582.0, rect.max.y - 3.0),
                                     );
                                     let del_resp = ui
                                         .interact(del_rect, ui.id().with("del_btn"), egui::Sense::click())
@@ -970,7 +964,7 @@ impl MobiMarketApp {
                                 };
                                 ui.painter().rect_filled(rect, 4.0, bg_color);
 
-                                // 컬럼 1: 좌측 품목명 텍스트 페인팅 (이벤트 차단 없음)
+                                // 컬럼 1: 좌측 품목명 텍스트 페인팅 (여유 너비 ~350px로 20자 이상 긴 이름도 가격과 겹치지 않음)
                                 let text_color = if is_selected {
                                     Color32::WHITE
                                 } else {
@@ -987,7 +981,7 @@ impl MobiMarketApp {
                                 // 컬럼 2: 현재가 (골드)
                                 let cur_price_color = Color32::from_rgb(250, 190, 80);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 225.0, center_y),
+                                    egui::pos2(base_x + 360.0, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     cur_price_str,
                                     egui::FontId::proportional(11.5),
@@ -997,17 +991,17 @@ impl MobiMarketApp {
                                 // 컬럼 3: 기간 최저가 (청량한 민트/하늘)
                                 let min_price_color = Color32::from_rgb(100, 210, 255);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 305.0, center_y),
+                                    egui::pos2(base_x + 455.0, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     min_price_str,
                                     egui::FontId::proportional(11.5),
                                     min_price_color,
                                 );
 
-                                // 컬럼 4: 기간 최고가 (산뜻한 로즈/오렌지 - is_deletable 상관없이 항상 base_x + 385.0 고정)
+                                // 컬럼 4: 기간 최고가 (산뜻한 로즈/오렌지 - is_deletable 상관없이 항상 base_x + 550.0 고정)
                                 let max_price_color = Color32::from_rgb(255, 120, 120);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 385.0, center_y),
+                                    egui::pos2(base_x + 550.0, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     max_price_str,
                                     egui::FontId::proportional(11.5),
