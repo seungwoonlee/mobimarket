@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MobiMarket — 최저가 시세 & 제작 계산기</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body class="bg-[#0b0f19] text-slate-100 font-sans h-screen flex flex-col antialiased select-none overflow-hidden">
+
+  <!-- ================= 1. 최상단 헤더 & 2대 메인 탭바 ================= -->
+  <header class="h-16 border-b border-slate-800 bg-slate-900 px-6 flex items-center justify-between shrink-0 z-50">
+    
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center font-black text-black text-xl shadow-lg shadow-amber-500/20">
+          M
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="font-extrabold text-base tracking-tight bg-gradient-to-r from-amber-200 via-yellow-300 to-orange-300 bg-clip-text text-transparent">MobiMarket</span>
+            <span class="text-[10px] text-amber-400 font-bold px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-800/40">최저가 기준</span>
+          </div>
+          <div class="text-[11px] text-slate-400">마비노기 모바일 마켓 시세 & 제작비용 계산기</div>
+        </div>
+      </div>
+
+      <!-- 게임 CLI 파이프 상태 배지 -->
+      <div id="cli-status-badge" class="h-7 px-3 rounded-full bg-emerald-950/70 border border-emerald-500/30 text-emerald-400 text-xs font-semibold flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="cli-status-text">게임 CLI 연동됨</span>
+      </div>
+
+      <!-- 현재 접속 직업 배지 -->
+      <div id="my-job-badge" class="h-7 px-3 rounded-full bg-indigo-950/80 border border-indigo-500/40 text-indigo-300 text-xs font-bold flex items-center gap-1.5">
+        <i data-lucide="user" class="w-3.5 h-3.5"></i>
+        <span>현재 직업: <span id="my-job-name" class="text-amber-300 font-extrabold">댄서</span></span>
+      </div>
+    </div>
+
+    <!-- 2대 메인 탭 전환 뷰 (하나만 독립 표시) -->
+    <div class="flex items-center bg-slate-950 p-1.5 rounded-2xl border border-slate-800 shadow-inner">
+      <button onclick="setMainTab('prices')" id="tab-btn-prices" class="tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20">
+        <i data-lucide="trending-up" class="w-4 h-4 stroke-[2.5]"></i>
+        <span>주요 아이템 시세</span>
+      </button>
+
+      <button onclick="setMainTab('calculator')" id="tab-btn-calculator" class="tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60">
+        <i data-lucide="calculator" class="w-4 h-4"></i>
+        <span>제작 아이템 계산기</span>
+      </button>
+    </div>
+
+    <!-- 우측 상태 정보 및 최저가 즉시 갱신 -->
+    <div class="flex items-center gap-4">
+      <div class="text-right text-[11px] text-slate-400 hidden xl:block">
+        <div>최신 시세 수집 시각</div>
+        <div id="last-sync-time" class="text-slate-200 font-semibold">오늘 16:41:26</div>
+      </div>
+      <button onclick="triggerRefresh()" id="refresh-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 border border-slate-700 flex items-center gap-2 transition">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-amber-400"></i>
+        <span>최저가 갱신</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= 2. 메인 뷰 컨테이너 (단일 탭 풀스크린 전개) ================= -->
+  <main class="flex-1 flex w-full overflow-hidden relative">
+
+    <!-- [TAB 1] 주요 아이템 시세 뷰 (풀스크린) -->
+    <div id="view-prices" class="flex-1 flex w-full h-[calc(100vh-4rem)] overflow-hidden">
+      
+      <!-- 좌측 패널: 품목 탐색 및 그룹 비교 필터 (380px) -->
+      <aside class="w-96 border-r border-slate-800 bg-slate-900/40 flex flex-col shrink-0">
+        <div class="p-3.5 border-b border-slate-800 space-y-2.5">
+          <div class="relative">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
+            <input type="text" id="price-search-input" placeholder="주요 품목 검색..." class="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+          </div>
+
+          <!-- 그룹 비교 원클릭 칩 -->
+          <div class="space-y-1.5 pt-1">
+            <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">한눈에 그룹 비교 그래프</div>
+            <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+              <button onclick="setCompareGroup('magic_stone')" id="btn-group-magic" class="group-btn px-2.5 py-1.5 rounded-lg bg-amber-500 text-black flex items-center gap-1.5 font-black border border-amber-400 shadow">
+                <span>🔮 마력석 3종 비교</span>
+              </button>
+              <button onclick="setCompareGroup('soul_stone')" id="btn-group-soul" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60">
+                <span>💎 영혼석 4종 비교</span>
+              </button>
+              <button onclick="setCompareGroup('boxes')" id="btn-group-boxes" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60">
+                <span>📦 무기/모자 상자</span>
+              </button>
+              <button onclick="setCompareGroup('collection_bags')" id="btn-group-bags" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60">
+                <span>🎒 컬렉션 백 5종</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto divide-y divide-slate-800/60" id="item-list">
+          <div class="p-3.5 hover:bg-slate-800/40 cursor-pointer flex items-center justify-between transition">
+            <div>
+              <div class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                <span>심해의 마력석</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded bg-purple-950/80 text-purple-400 border border-purple-800/50">레어</span>
+              </div>
+              <div class="text-[11px] text-slate-400 mt-0.5">해연 장비 재료</div>
+            </div>
+            <div class="text-right">
+              <div class="text-sm font-black text-slate-100">264 <span class="text-[10px] text-slate-400 font-normal">데카</span></div>
+              <div class="text-[10px] text-emerald-400 font-bold">-2.1%</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- 우측 메인: 선택 품목/그룹 가격 변동 그래프 (넓은 폭) -->
+      <section class="flex-1 flex flex-col overflow-y-auto p-6 gap-6">
+
+        <!-- 그룹 카드 그리드 -->
+        <div id="group-cards-grid" class="grid grid-cols-3 gap-4">
+          <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 relative overflow-hidden">
+            <div class="w-1.5 h-full absolute left-0 top-0 bg-purple-500"></div>
+            <div class="text-xs font-bold text-slate-200 pl-1.5">허상의 마력석</div>
+            <div class="mt-2 pl-1.5 flex items-baseline gap-1.5">
+              <span class="text-2xl font-black text-amber-400">109</span>
+              <span class="text-xs text-slate-400">데카</span>
+            </div>
+            <div class="mt-1 pl-1.5 text-[10px] text-slate-400 font-bold">보합</div>
+          </div>
+
+          <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 relative overflow-hidden">
+            <div class="w-1.5 h-full absolute left-0 top-0 bg-pink-500"></div>
+            <div class="text-xs font-bold text-slate-200 pl-1.5">포식의 마력석</div>
+            <div class="mt-2 pl-1.5 flex items-baseline gap-1.5">
+              <span class="text-2xl font-black text-amber-400">122</span>
+              <span class="text-xs text-slate-400">데카</span>
+            </div>
+            <div class="mt-1 pl-1.5 text-[10px] text-slate-400 font-bold">보합</div>
+          </div>
+
+          <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 relative overflow-hidden">
+            <div class="w-1.5 h-full absolute left-0 top-0 bg-cyan-500"></div>
+            <div class="text-xs font-bold text-slate-200 pl-1.5">심해의 마력석</div>
+            <div class="mt-2 pl-1.5 flex items-baseline gap-1.5">
+              <span class="text-2xl font-black text-amber-400">264</span>
+              <span class="text-xs text-slate-400">데카</span>
+            </div>
+            <div class="mt-1 pl-1.5 text-[10px] text-emerald-400 font-bold">-2.1% 하락</div>
+          </div>
+        </div>
+
+        <!-- 대형 최저가 변동 그래프 (그룹 비교 오버레이) -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col gap-4">
+          <div class="flex items-center justify-between">
+            <h3 id="chart-main-title" class="text-base font-extrabold text-slate-100 flex items-center gap-2">
+              <span>🔮 마력석 3종 최저가 비교 (허상 vs 포식 vs 심해)</span>
+            </h3>
+            <span class="text-xs text-slate-400">범례 클릭 시 개별 선 토글 On/Off</span>
+          </div>
+
+          <div class="h-96 w-full relative">
+            <canvas id="marketPriceChart"></canvas>
+          </div>
+        </div>
+
+      </section>
+    </div>
+
+    <!-- [TAB 2] 제작 아이템 계산기 뷰 (풀스크린, 기본 hidden) -->
+    <div id="view-calculator" class="flex-1 hidden w-full h-[calc(100vh-4rem)] overflow-hidden">
+      <aside class="w-96 border-r border-slate-800 bg-slate-900/40 flex flex-col shrink-0">
+        <div class="p-3.5 border-b border-slate-800 space-y-2.5">
+          <div class="relative">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
+            <input type="text" id="recipe-search-input" placeholder="장비 검색..." class="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+          </div>
+          <div class="flex items-center gap-1.5 text-[11px] overflow-x-auto pb-0.5">
+            <button class="px-3 py-1 rounded-lg bg-amber-500 text-black font-black whitespace-nowrap shadow">
+              <span>내 직업 전용 (댄서)</span>
+            </button>
+            <button class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">전체 장비</button>
+            <button class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">해연의 ~</button>
+            <button class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">잔영의 ~</button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto divide-y divide-slate-800/60" id="recipe-list">
+          <div class="p-3.5 bg-amber-500/10 border-l-4 border-amber-500 cursor-pointer flex items-center justify-between">
+            <div>
+              <div class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                <span>해연의 플랫 대거ZZ</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-400 border border-indigo-800/50">해연</span>
+              </div>
+              <div class="text-[11px] text-slate-400 mt-0.5">완제품 마켓 최저가: <span class="text-amber-400 font-bold">8,034 데카</span></div>
+            </div>
+            <div class="text-right">
+              <div class="text-sm font-black text-emerald-400">+5,210 <span class="text-[10px] text-slate-400 font-normal">절감</span></div>
+              <div class="text-[10px] text-emerald-400 font-bold">직접 제작 이득!</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="flex-1 flex flex-col overflow-y-auto p-6 gap-6">
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+              <i data-lucide="shield" class="w-7 h-7"></i>
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <h2 class="text-xl font-black text-slate-100">해연의 플랫 대거ZZ</h2>
+                <span class="px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/40 text-xs font-bold">직접 제작 강력 추천 (완제품 대비 절감)</span>
+              </div>
+              <p class="text-xs text-slate-400 mt-1">대장기술 레시피 · 1회당 1개 생산 · 성공률 80% (대성공 12%)</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+  </main>
+
+  <script>
+    lucide.createIcons();
+
+    function setMainTab(tabKey) {
+      const pricesView = document.getElementById('view-prices');
+      const calcView = document.getElementById('view-calculator');
+      const pricesBtn = document.getElementById('tab-btn-prices');
+      const calcBtn = document.getElementById('tab-btn-calculator');
+
+      if (tabKey === 'prices') {
+        pricesView.classList.remove('hidden');
+        pricesView.classList.add('flex');
+        calcView.classList.add('hidden');
+        calcView.classList.remove('flex');
+
+        pricesBtn.className = 'tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20';
+        calcBtn.className = 'tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60';
+      } else {
+        calcView.classList.remove('hidden');
+        calcView.classList.add('flex');
+        pricesView.classList.add('hidden');
+        pricesView.classList.remove('flex');
+
+        calcBtn.className = 'tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20';
+        pricesBtn.className = 'tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60';
+      }
+    }
+  </script>
+</body>
+</html>

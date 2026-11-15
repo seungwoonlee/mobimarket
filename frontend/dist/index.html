@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MobiMarket — 최저가 시세 & 제작 계산기</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body class="bg-[#0b0f19] text-slate-100 font-sans h-screen flex flex-col antialiased select-none overflow-hidden">
+
+  <!-- ================= 1. 최상단 헤더 & 2대 메인 탭바 ================= -->
+  <header class="h-16 border-b border-slate-800 bg-slate-900 px-6 flex items-center justify-between shrink-0 z-50">
+    
+    <!-- 로고 & CLI 연결 상태 & 내 직업 배지 -->
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center font-black text-black text-xl shadow-lg shadow-amber-500/20">
+          M
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="font-extrabold text-base tracking-tight bg-gradient-to-r from-amber-200 via-yellow-300 to-orange-300 bg-clip-text text-transparent">MobiMarket</span>
+            <span class="text-[10px] text-amber-400 font-bold px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-800/40">최저가 기준</span>
+          </div>
+          <div class="text-[11px] text-slate-400">마비노기 모바일 마켓 시세 & 제작비용 계산기</div>
+        </div>
+      </div>
+
+      <!-- 게임 CLI 파이프 상태 배지 -->
+      <div id="cli-status-badge" class="h-7 px-3 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-semibold flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+        <span id="cli-status-text">CLI 상태 확인 중...</span>
+      </div>
+
+      <!-- 현재 접속 직업 배지 -->
+      <div id="my-job-badge" class="h-7 px-3 rounded-full bg-indigo-950/80 border border-indigo-500/40 text-indigo-300 text-xs font-bold flex items-center gap-1.5 hidden">
+        <i data-lucide="user" class="w-3.5 h-3.5"></i>
+        <span>현재 직업: <span id="my-job-name" class="text-amber-300 font-extrabold">-</span></span>
+      </div>
+    </div>
+
+    <!-- 2대 메인 탭 전환 뷰 (하나만 독립 표시) -->
+    <div class="flex items-center bg-slate-950 p-1.5 rounded-2xl border border-slate-800 shadow-inner">
+      <button onclick="setMainTab('prices')" id="tab-btn-prices" class="tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20">
+        <i data-lucide="trending-up" class="w-4 h-4 stroke-[2.5]"></i>
+        <span>주요 아이템 시세</span>
+      </button>
+
+      <button onclick="setMainTab('calculator')" id="tab-btn-calculator" class="tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60">
+        <i data-lucide="calculator" class="w-4 h-4"></i>
+        <span>제작 아이템 계산기</span>
+      </button>
+    </div>
+
+    <!-- 우측 상태 정보 및 최저가 즉시 갱신 -->
+    <div class="flex items-center gap-4">
+      <div class="text-right text-[11px] text-slate-400 hidden xl:block">
+        <div>최신 시세 수집 시각</div>
+        <div id="last-sync-time" class="text-slate-200 font-semibold">-</div>
+      </div>
+      <button onclick="triggerRefresh()" id="refresh-btn" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 border border-slate-700 flex items-center gap-2 transition">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-amber-400"></i>
+        <span>최저가 갱신</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= 2. 메인 뷰 컨테이너 (단일 탭 풀스크린 전개) ================= -->
+  <main class="flex-1 flex w-full overflow-hidden relative">
+
+    <!-- ================================================================= -->
+    <!-- [TAB 1] 주요 아이템 시세 뷰 (풀스크린) -->
+    <!-- ================================================================= -->
+    <div id="view-prices" class="flex-1 flex w-full h-[calc(100vh-4rem)] overflow-hidden">
+      
+      <!-- 좌측 패널: 품목 탐색 및 그룹 비교 필터 (380px) -->
+      <aside class="w-96 border-r border-slate-800 bg-slate-900/40 flex flex-col shrink-0">
+        <div class="p-3.5 border-b border-slate-800 space-y-2.5">
+          <div class="relative">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
+            <input type="text" id="price-search-input" oninput="filterPriceItems()" placeholder="주요 품목 검색..." class="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+          </div>
+
+          <!-- 그룹 비교 원클릭 칩 (마력석끼리 / 영혼석끼리 / 상자끼리 / 컬렉션백끼리) -->
+          <div class="space-y-1.5 pt-1">
+            <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">한눈에 그룹 비교 그래프</div>
+            <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+              <button onclick="setCompareGroup('magic_stone')" id="btn-group-magic" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition">
+                <span>🔮 마력석 3종 비교</span>
+              </button>
+              <button onclick="setCompareGroup('soul_stone')" id="btn-group-soul" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition">
+                <span>💎 영혼석 4종 비교</span>
+              </button>
+              <button onclick="setCompareGroup('boxes')" id="btn-group-boxes" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition">
+                <span>📦 무기/모자 상자</span>
+              </button>
+              <button onclick="setCompareGroup('collection_bags')" id="btn-group-bags" class="group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition">
+                <span>🎒 컬렉션 백 5종</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto divide-y divide-slate-800/60" id="item-list">
+          <div class="p-6 text-center text-xs text-slate-500">시세 데이터를 불러오는 중...</div>
+        </div>
+      </aside>
+
+      <!-- 우측 메인: 선택 품목/그룹 가격 변동 그래프 (넓은 폭) -->
+      <section class="flex-1 flex flex-col overflow-y-auto p-6 gap-6">
+
+        <!-- 헤더 카드 영역 (단일 품목 또는 그룹 비교 요약) -->
+        <div id="price-summary-header" class="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <div class="flex items-center gap-3">
+              <h2 id="view-item-name" class="text-2xl font-black text-slate-100">-</h2>
+              <span id="view-item-badge" class="px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 text-xs font-bold">일반</span>
+              <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400">기준가격 = 현재 최저 매물가</span>
+            </div>
+            <p id="view-item-category" class="text-xs text-slate-400 mt-1">공식 CLI 실시간 최저가 추적</p>
+          </div>
+
+          <div class="text-right">
+            <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">현재 마켓 최저가</div>
+            <div class="flex items-baseline gap-2 mt-1">
+              <span id="view-item-price" class="text-4xl font-black text-amber-400">-</span>
+              <span class="text-sm text-amber-400 font-bold">데카</span>
+            </div>
+            <div id="view-item-change" class="text-xs text-slate-400 font-semibold mt-1">변동 데이터 없음</div>
+          </div>
+        </div>
+
+        <!-- 그룹 비교 시 품목별 카드 그리드 (그룹 모드일 때 동적 렌더링) -->
+        <div id="group-cards-grid" class="grid grid-cols-4 gap-4 hidden"></div>
+
+        <!-- 대형 최저가 변동 그래프 -->
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col gap-4">
+          <div class="flex items-center justify-between">
+            <h3 id="chart-main-title" class="text-base font-extrabold text-slate-100 flex items-center gap-2">
+              <span>최저가 가격 변동 추이 (Price Trend)</span>
+              <span class="text-xs text-slate-500 font-normal">단위: 데카(Deka)</span>
+            </h3>
+            <span class="text-xs text-slate-400">범례 클릭 시 개별 선 토글 On/Off</span>
+          </div>
+
+          <div class="h-96 w-full relative">
+            <canvas id="marketPriceChart"></canvas>
+          </div>
+        </div>
+
+        <!-- 최저가 스냅샷 히스토리 테이블 -->
+        <div id="history-table-container" class="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden">
+          <div class="px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/80">
+            <span class="text-xs font-black text-slate-200">최근 최저가 수집 기록</span>
+            <span class="text-[11px] text-slate-500">SQLite History</span>
+          </div>
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950/70 text-slate-400 text-[11px] font-bold border-b border-slate-800">
+              <tr>
+                <th class="px-6 py-2.5">수집 시각</th>
+                <th class="px-6 py-2.5">최저 매물가</th>
+                <th class="px-6 py-2.5">재고 상태</th>
+              </tr>
+            </thead>
+            <tbody id="history-table-body" class="divide-y divide-slate-800/60">
+              <tr><td colspan="3" class="px-6 py-4 text-center text-slate-500">기록이 없습니다.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- [TAB 2] 제작 아이템 계산기 뷰 (풀스크린, 기본 hidden) -->
+    <!-- ================================================================= -->
+    <div id="view-calculator" class="flex-1 hidden w-full h-[calc(100vh-4rem)] overflow-hidden">
+      
+      <!-- 좌측 패널: 잔영/해연 레시피 목록 (380px) -->
+      <aside class="w-96 border-r border-slate-800 bg-slate-900/40 flex flex-col shrink-0">
+        <div class="p-3.5 border-b border-slate-800 space-y-2.5">
+          <div class="relative">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-slate-400"></i>
+            <input type="text" id="recipe-search-input" oninput="filterRecipes()" placeholder="장비 검색..." class="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500">
+          </div>
+
+          <!-- 직업별 필터 칩 (내 직업 기본 활성화) -->
+          <div class="flex items-center gap-1.5 text-[11px] overflow-x-auto pb-0.5">
+            <button onclick="setJobFilter('my_job')" id="btn-filter-my-job" class="px-3 py-1 rounded-lg bg-amber-500 text-black font-black whitespace-nowrap shadow">
+              <span id="btn-filter-my-job-text">내 직업 전용</span>
+            </button>
+            <button onclick="setJobFilter('all')" id="btn-filter-all" class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">
+              전체 장비
+            </button>
+            <button onclick="setJobFilter('haeyeon')" id="btn-filter-haeyeon" class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">
+              해연의 ~
+            </button>
+            <button onclick="setJobFilter('janyeong')" id="btn-filter-janyeong" class="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium">
+              잔영의 ~
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto divide-y divide-slate-800/60" id="recipe-list">
+          <div class="p-6 text-center text-xs text-slate-500">레시피를 불러오는 중...</div>
+        </div>
+      </aside>
+
+      <!-- 우측 메인: 계산기 대시보드 (넓은 폭) -->
+      <section class="flex-1 flex flex-col overflow-y-auto p-6 gap-6">
+
+        <div class="p-6 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+              <i data-lucide="shield" class="w-7 h-7"></i>
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <h2 id="calc-recipe-name" class="text-xl font-black text-slate-100">-</h2>
+                <span id="calc-recipe-recommendation" class="px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 text-xs font-bold">-</span>
+              </div>
+              <p id="calc-recipe-info" class="text-xs text-slate-400 mt-1">1회 제작당 생산량 및 성공률</p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 bg-slate-950 p-2 rounded-2xl border border-slate-800">
+            <span class="text-xs text-slate-400 px-2 font-bold">제작 수량:</span>
+            <button onclick="changeCraftCount(-1)" class="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center">-</button>
+            <input type="number" id="calc-count-input" value="1" min="1" onchange="recalculateCurrent()" class="w-12 bg-transparent text-center font-black text-base text-amber-400 focus:outline-none">
+            <button onclick="changeCraftCount(1)" class="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-black text-sm flex items-center justify-center">+</button>
+          </div>
+        </div>
+
+        <!-- 3단 최저가 가격 비교 카드 -->
+        <div class="grid grid-cols-3 gap-5">
+          <div class="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">A. 완제품 마켓 최저가</div>
+              <div class="mt-2 flex items-baseline gap-2">
+                <span id="calc-product-price" class="text-3xl font-black text-slate-200">-</span>
+                <span class="text-xs text-slate-400">데카</span>
+              </div>
+            </div>
+            <div class="mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-400">마켓 즉시 구매 시 가격</div>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-slate-900 border border-amber-500/40 relative shadow-lg shadow-amber-500/5">
+            <div>
+              <div class="text-[11px] font-bold text-amber-400 uppercase tracking-wider">B. 재료 최저가 구매 제작비</div>
+              <div class="mt-2 flex items-baseline gap-2">
+                <span id="calc-material-cost" class="text-3xl font-black text-amber-300">-</span>
+                <span class="text-xs text-amber-400 font-bold">데카</span>
+              </div>
+            </div>
+            <div id="calc-saving-text" class="mt-4 pt-3 border-t border-slate-800/80 text-xs font-bold text-slate-400">절감액 계산 중</div>
+          </div>
+
+          <div class="p-5 rounded-2xl bg-emerald-950/20 border border-emerald-500/40 flex flex-col justify-between shadow-lg shadow-emerald-500/5">
+            <div>
+              <div class="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                <i data-lucide="check-circle" class="w-4 h-4"></i>
+                <span>C. 내 재고 차감 실구매액</span>
+              </div>
+              <div class="mt-2 flex items-baseline gap-2">
+                <span id="calc-gap-cost" class="text-3xl font-black text-emerald-400">-</span>
+                <span class="text-xs text-emerald-400 font-bold">데카</span>
+              </div>
+            </div>
+            <div class="mt-4 pt-3 border-t border-emerald-900/40 text-xs text-emerald-300/80">내 가방/창고 보유분 자동 차감</div>
+          </div>
+        </div>
+
+        <!-- 재료별 최저가 명세 테이블 -->
+        <div class="rounded-2xl border border-slate-800 bg-slate-900 overflow-hidden">
+          <div class="px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/80">
+            <span class="text-xs font-black text-slate-200">필수 재료 최저가 및 소요비용 산출 명세</span>
+            <span class="text-[11px] text-slate-400">공식 CLI 실측치 연동</span>
+          </div>
+
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950/70 text-slate-400 text-[11px] font-bold border-b border-slate-800">
+              <tr>
+                <th class="px-6 py-2.5">필수 재료명</th>
+                <th class="px-6 py-2.5">총 필요 수량</th>
+                <th class="px-6 py-2.5">내 보유량 (get_items)</th>
+                <th class="px-6 py-2.5">부족 수량 (실구매)</th>
+                <th class="px-6 py-2.5">마켓 최저단가</th>
+                <th class="px-6 py-2.5 text-right">총 소요비용</th>
+              </tr>
+            </thead>
+            <tbody id="calc-ingredients-body" class="divide-y divide-slate-800/60">
+              <tr><td colspan="6" class="px-6 py-4 text-center text-slate-500">재료를 불러오는 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </section>
+    </div>
+
+  </main>
+
+  <script>
+    lucide.createIcons();
+
+    let allPrices = [];
+    let allRecipes = [];
+    let currentSelectedPriceItem = null;
+    let currentSelectedRecipe = null;
+    let chartInstance = null;
+    let currentUserJob = "댄서";
+    let currentJobFilterMode = "my_job";
+    let currentGroupMode = null; // null | 'magic_stone' | 'soul_stone' | 'boxes' | 'collection_bags'
+
+    // 그룹 정의
+    const COMPARE_GROUPS = {
+      "magic_stone": {
+        title: "🔮 마력석 3종 최저가 비교 (허상 vs 포식 vs 심해)",
+        items: ["허상의 마력석", "포식의 마력석", "심해의 마력석"],
+        colors: ["#a855f7", "#ec4899", "#06b6d4"]
+      },
+      "soul_stone": {
+        title: "💎 영혼석 4종 최저가 비교 (공명 vs 파동 vs 망령 vs 원념)",
+        items: ["공명의 영혼석", "파동의 영혼석", "망령의 영혼석", "원념의 영혼석"],
+        colors: ["#3b82f6", "#10b981", "#f59e0b", "#ef4444"]
+      },
+      "boxes": {
+        title: "📦 상자류 최저가 비교 (무기 선택 상자 vs 바람개비 모자 상자)",
+        items: ["이상한 고양이의 특별 무기 선택 상자", "바람개비 모자 상자(거래가능)"],
+        colors: ["#8b5cf6", "#f97316"]
+      },
+      "collection_bags": {
+        title: "🎒 컬렉션 백 & 패키지 5종 최저가 비교",
+        items: [
+          "서머 바캉스 컬렉션 백",
+          "조이풀 크루 컬렉션 백",
+          "코지데이 컬렉션 백",
+          "카마인 에버모어 로즈 패치 컬렉션 백",
+          "그랜드 앙상블 토탈 패키지"
+        ],
+        colors: ["#e11d48", "#22c55e", "#0ea5e9", "#f59e0b", "#a855f7"]
+      }
+    };
+
+    const JOB_EQUIPMENT_KEYWORDS = {
+      "댄서": ["꽃잎 접부채", "켈틱 류트", "커브드 하프", "플랫 대거", "가죽 갑옷", "전투복", "페리도트"],
+      "음유시인": ["켈틱 류트", "커브드 하프", "꽃잎 접부채", "전투복", "가죽 갑옷", "페리도트"],
+      "검사": ["숏소드", "그레이트 소드", "론 엣지소드", "라이트 핼버드", "비늘 갑옷", "페리도트"],
+      "대검전사": ["그레이트 소드", "숏소드", "론 엣지소드", "비늘 갑옷", "페리도트"],
+      "전사": ["숏소드", "그레이트 소드", "론 엣지소드", "라이트 핼버드", "비늘 갑옷", "페리도트"],
+      "궁수": ["숏보우", "라이트 크로스보우", "라이트 롱보우", "가죽 갑옷", "페리도트"],
+      "석궁사": ["라이트 크로스보우", "숏보우", "가죽 갑옷", "페리도트"],
+      "도적": ["플랫 대거", "샤프 듀얼소드", "라이트 너클", "가죽 갑옷", "페리도트"],
+      "마법사": ["우드 완드", "크리스탈 스태프", "스노우 오브", "라운드헤드 케인", "전투복", "페리도트"],
+      "힐러": ["마블 힐링 완드", "우드 완드", "라운드 코일", "전투복", "페리도트"],
+      "사제": ["마블 힐링 완드", "우드 완드", "라운드 코일", "전투복", "페리도트"]
+    };
+
+    function initChart() {
+      const ctx = document.getElementById('marketPriceChart').getContext('2d');
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: {
+              display: true,
+              position: 'top',
+              align: 'end',
+              labels: { color: '#cbd5e1', font: { weight: 'bold', size: 11 }, boxWidth: 12 }
+            }
+          },
+          scales: {
+            x: { grid: { color: 'rgba(51, 65, 85, 0.4)' }, ticks: { color: '#64748b' } },
+            y: {
+              grid: { color: 'rgba(51, 65, 85, 0.4)' },
+              ticks: { color: '#64748b', callback: val => val.toLocaleString() + ' 데카' }
+            }
+          }
+        }
+      });
+    }
+
+    function setMainTab(tabKey) {
+      const pricesView = document.getElementById('view-prices');
+      const calcView = document.getElementById('view-calculator');
+      const pricesBtn = document.getElementById('tab-btn-prices');
+      const calcBtn = document.getElementById('tab-btn-calculator');
+
+      if (tabKey === 'prices') {
+        pricesView.classList.remove('hidden');
+        pricesView.classList.add('flex');
+        calcView.classList.add('hidden');
+        calcView.classList.remove('flex');
+
+        pricesBtn.className = 'tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20';
+        calcBtn.className = 'tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60';
+
+        if (chartInstance) setTimeout(() => chartInstance.resize(), 50);
+      } else {
+        calcView.classList.remove('hidden');
+        calcView.classList.add('flex');
+        pricesView.classList.add('hidden');
+        pricesView.classList.remove('flex');
+
+        calcBtn.className = 'tab-button active px-7 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2.5 bg-gradient-to-r from-amber-500 to-amber-600 text-black shadow-md shadow-amber-500/20';
+        pricesBtn.className = 'tab-button px-7 py-2 rounded-xl text-sm font-bold transition-all flex items-center gap-2.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800/60';
+      }
+    }
+
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        const badge = document.getElementById('cli-status-badge');
+        const text = document.getElementById('cli-status-text');
+        
+        if (data.connected) {
+          badge.className = 'h-7 px-3 rounded-full bg-emerald-950/70 border border-emerald-500/30 text-emerald-400 text-xs font-semibold flex items-center gap-2';
+          text.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>게임 CLI 연동됨</span>';
+        } else {
+          badge.className = 'h-7 px-3 rounded-full bg-rose-950/70 border border-rose-500/30 text-rose-400 text-xs font-semibold flex items-center gap-2';
+          text.innerHTML = '<span class="w-2 h-2 rounded-full bg-rose-400"></span><span>게임 미실행 (오프라인)</span>';
+        }
+
+        if (data.job_name) {
+          currentUserJob = data.job_name;
+          const jobBadge = document.getElementById('my-job-badge');
+          jobBadge.classList.remove('hidden');
+          document.getElementById('my-job-name').innerText = currentUserJob;
+          document.getElementById('btn-filter-my-job-text').innerText = `내 직업 전용 (${currentUserJob})`;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function loadPrices() {
+      try {
+        const res = await fetch('/api/prices');
+        allPrices = await res.json();
+        renderPriceList(allPrices);
+        if (allPrices.length > 0 && !currentSelectedPriceItem && !currentGroupMode) {
+          selectPriceItem(allPrices[0].item_name);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function renderPriceList(items) {
+      const container = document.getElementById('item-list');
+      if (items.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-xs text-slate-500">수집된 시세가 없습니다.</div>';
+        return;
+      }
+
+      container.innerHTML = items.map(it => {
+        const isSelected = !currentGroupMode && currentSelectedPriceItem === it.item_name;
+        const activeClass = isSelected ? 'bg-amber-500/10 border-l-4 border-amber-500' : 'hover:bg-slate-800/40';
+        return `
+          <div onclick="selectPriceItem('${it.item_name}')" class="p-3.5 ${activeClass} cursor-pointer flex items-center justify-between transition">
+            <div>
+              <div class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                <span>${it.item_name}</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400">${it.rarity || '일반'}</span>
+              </div>
+              <div class="text-[11px] text-slate-500 mt-0.5">${it.in_stock ? '재고있음' : '품절'}</div>
+            </div>
+            <div class="text-right">
+              <div class="text-sm font-black text-amber-400">${it.min_unit_price.toLocaleString()} <span class="text-[10px] text-slate-400 font-normal">데카</span></div>
+              <div class="text-[10px] ${it.change_24h_percent >= 0 ? 'text-rose-400' : 'text-emerald-400'} font-bold">
+                ${it.change_24h_percent > 0 ? '+' : ''}${it.change_24h_percent}%
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // 그룹핑 비교 선택 핸들러
+    async function setCompareGroup(groupKey) {
+      currentGroupMode = groupKey;
+      currentSelectedPriceItem = null;
+
+      // 버튼 하이라이트
+      document.querySelectorAll('.group-btn').forEach(b => {
+        b.className = 'group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition';
+      });
+      const activeBtn = document.getElementById(
+        groupKey === 'magic_stone' ? 'btn-group-magic' :
+        groupKey === 'soul_stone' ? 'btn-group-soul' :
+        groupKey === 'boxes' ? 'btn-group-boxes' : 'btn-group-bags'
+      );
+      if (activeBtn) {
+        activeBtn.className = 'group-btn px-2.5 py-1.5 rounded-lg bg-amber-500 text-black flex items-center gap-1.5 font-black border border-amber-400 shadow transition';
+      }
+
+      renderPriceList(allPrices);
+
+      const groupDef = COMPARE_GROUPS[groupKey];
+      document.getElementById('chart-main-title').innerHTML = `<span>${groupDef.title}</span>`;
+      document.getElementById('price-summary-header').classList.add('hidden');
+      document.getElementById('history-table-container').classList.add('hidden');
+
+      // 그룹 카드 그리드 표시
+      const cardsGrid = document.getElementById('group-cards-grid');
+      cardsGrid.classList.remove('hidden');
+      
+      const groupPrices = allPrices.filter(p => groupDef.items.includes(p.item_name));
+      cardsGrid.innerHTML = groupPrices.map((p, idx) => `
+        <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 relative overflow-hidden">
+          <div class="w-1.5 h-full absolute left-0 top-0" style="background-color: ${groupDef.colors[idx % groupDef.colors.length]}"></div>
+          <div class="text-xs font-bold text-slate-200 pl-1.5">${p.item_name}</div>
+          <div class="mt-2 pl-1.5 flex items-baseline gap-1.5">
+            <span class="text-xl font-black text-amber-400">${p.min_unit_price.toLocaleString()}</span>
+            <span class="text-xs text-slate-400">데카</span>
+          </div>
+          <div class="mt-1 pl-1.5 text-[10px] ${p.change_24h_percent >= 0 ? 'text-rose-400' : 'text-emerald-400'} font-bold">
+            ${p.change_24h_percent > 0 ? '+' : ''}${p.change_24h_percent}%
+          </div>
+        </div>
+      `).join('');
+
+      // 멀티 데이터셋 히스토리 가져오기
+      try {
+        const queryNames = groupDef.items.join(',');
+        const res = await fetch(`/api/group_history?names=${encodeURIComponent(queryNames)}&limit=30`);
+        const groupHistory = await res.json();
+
+        // 타임스탬프 라벨 통일
+        let allTimestamps = [];
+        groupHistory.forEach(gh => {
+          gh.history.forEach(h => {
+            const time = h.scraped_at.substring(11, 16);
+            if (!allTimestamps.includes(time)) allTimestamps.push(time);
+          });
+        });
+        allTimestamps.sort();
+
+        const datasets = groupHistory.map((gh, idx) => {
+          const color = groupDef.colors[idx % groupDef.colors.length];
+          const dataMap = {};
+          gh.history.forEach(h => { dataMap[h.scraped_at.substring(11, 16)] = h.min_unit_price; });
+
+          return {
+            label: gh.name,
+            data: allTimestamps.map(t => dataMap[t] || null),
+            borderColor: color,
+            borderWidth: 2.5,
+            backgroundColor: 'transparent',
+            tension: 0.25,
+            pointBackgroundColor: color,
+            pointBorderColor: '#0f172a',
+            pointRadius: 4
+          };
+        });
+
+        if (chartInstance) {
+          chartInstance.data.labels = allTimestamps;
+          chartInstance.data.datasets = datasets;
+          chartInstance.update();
+        }
+
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function selectPriceItem(name) {
+      currentGroupMode = null;
+      currentSelectedPriceItem = name;
+
+      document.querySelectorAll('.group-btn').forEach(b => {
+        b.className = 'group-btn px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5 font-bold border border-slate-700/60 transition';
+      });
+
+      renderPriceList(allPrices);
+
+      document.getElementById('price-summary-header').classList.remove('hidden');
+      document.getElementById('history-table-container').classList.remove('hidden');
+      document.getElementById('group-cards-grid').classList.add('hidden');
+      document.getElementById('chart-main-title').innerHTML = `<span>${name} 최저가 가격 변동 추이</span>`;
+
+      const target = allPrices.find(p => p.item_name === name);
+      if (target) {
+        document.getElementById('view-item-name').innerText = target.item_name;
+        document.getElementById('view-item-price').innerText = target.min_unit_price.toLocaleString();
+        document.getElementById('view-item-badge').innerText = target.rarity || '일반';
+        document.getElementById('last-sync-time').innerText = target.scraped_at;
+        
+        const ch = target.change_24h_percent;
+        document.getElementById('view-item-change').innerHTML = `
+          <span class="${ch >= 0 ? 'text-rose-400' : 'text-emerald-400'} font-bold">
+            ${ch > 0 ? '+' : ''}${ch}% 변동
+          </span>
+        `;
+      }
+
+      try {
+        const res = await fetch(`/api/history?name=${encodeURIComponent(name)}&limit=30`);
+        const history = await res.json();
+        
+        if (chartInstance) {
+          const ctx = document.getElementById('marketPriceChart').getContext('2d');
+          const gradient = ctx.createLinearGradient(0, 0, 0, 340);
+          gradient.addColorStop(0, 'rgba(245, 158, 11, 0.35)');
+          gradient.addColorStop(1, 'rgba(245, 158, 11, 0.0)');
+
+          chartInstance.data.labels = history.map(h => h.scraped_at.substring(11, 16));
+          chartInstance.data.datasets = [{
+            label: `${name} 최저 매물가`,
+            data: history.map(h => h.min_unit_price),
+            borderColor: '#f59e0b',
+            borderWidth: 3,
+            backgroundColor: gradient,
+            fill: true,
+            tension: 0.25,
+            pointBackgroundColor: '#f59e0b',
+            pointBorderColor: '#0f172a',
+            pointRadius: 4
+          }];
+          chartInstance.update();
+        }
+
+        const tbody = document.getElementById('history-table-body');
+        if (history.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" class="px-6 py-4 text-center text-slate-500">기록이 없습니다.</td></tr>';
+        } else {
+          tbody.innerHTML = history.slice().reverse().map(h => `
+            <tr class="hover:bg-slate-800/30">
+              <td class="px-6 py-3 text-slate-400">${h.scraped_at}</td>
+              <td class="px-6 py-3 font-black text-amber-400 text-sm">${h.min_unit_price.toLocaleString()} 데카</td>
+              <td class="px-6 py-3">
+                <span class="px-2 py-0.5 rounded-full ${h.in_stock ? 'bg-emerald-950 text-emerald-400' : 'bg-slate-800 text-slate-500'} text-[10px] font-bold">
+                  ${h.in_stock ? '재고있음' : '품절'}
+                </span>
+              </td>
+            </tr>
+          `).join('');
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function filterPriceItems() {
+      const q = document.getElementById('price-search-input').value.trim().toLowerCase();
+      const filtered = allPrices.filter(p => p.item_name.toLowerCase().includes(q));
+      renderPriceList(filtered);
+    }
+
+    async function loadRecipes() {
+      try {
+        const res = await fetch('/api/recipes');
+        allRecipes = await res.json();
+        applyRecipeFilters();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function setJobFilter(mode) {
+      currentJobFilterMode = mode;
+      
+      const buttons = ['my_job', 'all', 'haeyeon', 'janyeong'];
+      buttons.forEach(b => {
+        const btn = document.getElementById('btn-filter-' + b.replace('_', '-'));
+        if (btn) {
+          if (b === mode) {
+            btn.className = 'px-3 py-1 rounded-lg bg-amber-500 text-black font-black whitespace-nowrap shadow';
+          } else {
+            btn.className = 'px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 whitespace-nowrap font-medium';
+          }
+        }
+      });
+
+      applyRecipeFilters();
+    }
+
+    function applyRecipeFilters() {
+      const q = document.getElementById('recipe-search-input').value.trim().toLowerCase();
+      const keywords = JOB_EQUIPMENT_KEYWORDS[currentUserJob] || JOB_EQUIPMENT_KEYWORDS["댄서"];
+
+      let filtered = allRecipes.filter(r => {
+        const name = r.display_name.toLowerCase();
+        if (q && !name.includes(q)) return false;
+
+        if (currentJobFilterMode === 'my_job') {
+          return keywords.some(kw => r.display_name.includes(kw));
+        } else if (currentJobFilterMode === 'haeyeon') {
+          return r.display_name.includes('해연');
+        } else if (currentJobFilterMode === 'janyeong') {
+          return r.display_name.includes('잔영');
+        }
+        return true;
+      });
+
+      renderRecipeList(filtered);
+      if (filtered.length > 0 && (!currentSelectedRecipe || !filtered.some(f => f.display_name === currentSelectedRecipe))) {
+        selectRecipe(filtered[0].display_name);
+      }
+    }
+
+    function renderRecipeList(recipes) {
+      const container = document.getElementById('recipe-list');
+      if (recipes.length === 0) {
+        container.innerHTML = '<div class="p-6 text-center text-xs text-slate-500">해당 필터에 일치하는 장비 레시피가 없습니다.</div>';
+        return;
+      }
+
+      container.innerHTML = recipes.map(r => {
+        const isSelected = currentSelectedRecipe === r.display_name;
+        const activeClass = isSelected ? 'bg-amber-500/10 border-l-4 border-amber-500' : 'hover:bg-slate-800/40';
+        return `
+          <div onclick="selectRecipe('${r.display_name}')" class="p-3.5 ${activeClass} cursor-pointer flex items-center justify-between transition">
+            <div>
+              <div class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                <span>${r.display_name}</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400">
+                  ${r.display_name.includes('해연') ? '해연' : '잔영'}
+                </span>
+              </div>
+              <div class="text-[11px] text-slate-400 mt-0.5">성공률: ${r.success_rate}% (대성공 ${r.critical_success_rate}%)</div>
+            </div>
+            <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
+          </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    function filterRecipes() {
+      applyRecipeFilters();
+    }
+
+    async function selectRecipe(recipeName) {
+      currentSelectedRecipe = recipeName;
+      applyRecipeFilters();
+      recalculateCurrent();
+    }
+
+    async function recalculateCurrent() {
+      if (!currentSelectedRecipe) return;
+      const count = parseInt(document.getElementById('calc-count-input').value) || 1;
+      
+      try {
+        const res = await fetch(`/api/calculate?recipe=${encodeURIComponent(currentSelectedRecipe)}&count=${count}`);
+        const result = await res.json();
+        if (!result.success) {
+          alert('계산 실패: ' + result.error);
+          return;
+        }
+
+        const data = result.data;
+        document.getElementById('calc-recipe-name').innerText = data.display_name;
+        document.getElementById('calc-recipe-recommendation').innerText = data.recommendation;
+        document.getElementById('calc-recipe-info').innerText = `1회당 ${data.produced_quantity / data.craft_count}개 생산 · 성공률 ${data.success_rate}% · 대성공 ${data.critical_success_rate}%`;
+
+        document.getElementById('calc-product-price').innerText = data.product_total_market_price ? data.product_total_market_price.toLocaleString() : '시세없음';
+        document.getElementById('calc-material-cost').innerText = data.total_material_cost.toLocaleString();
+        document.getElementById('calc-gap-cost').innerText = data.user_inventory_gap_cost.toLocaleString();
+
+        const savingElem = document.getElementById('calc-saving-text');
+        if (data.saving_amount !== null && data.saving_amount !== undefined) {
+          if (data.saving_amount > 0) {
+            savingElem.className = 'mt-4 pt-3 border-t border-slate-800/80 text-xs font-bold text-emerald-400';
+            savingElem.innerText = `직접 제작 시 ${data.saving_amount.toLocaleString()} 데카 절약!`;
+          } else {
+            savingElem.className = 'mt-4 pt-3 border-t border-slate-800/80 text-xs font-bold text-rose-400';
+            savingElem.innerText = `완제품 구매가 ${Math.abs(data.saving_amount).toLocaleString()} 데카 더 저렴`;
+          }
+        } else {
+          savingElem.innerText = '완제품 마켓 시세 없음';
+        }
+
+        const tbody = document.getElementById('calc-ingredients-body');
+        tbody.innerHTML = data.ingredients.map(ing => `
+          <tr class="hover:bg-slate-800/30">
+            <td class="px-6 py-3.5 font-bold text-slate-100 text-sm">${ing.display_name}</td>
+            <td class="px-6 py-3.5 font-medium">${ing.total_required}개</td>
+            <td class="px-6 py-3.5 ${ing.owned_count >= ing.total_required ? 'text-emerald-400 font-bold' : 'text-slate-400'}">${ing.owned_count}개</td>
+            <td class="px-6 py-3.5 ${ing.shortage_count > 0 ? 'text-amber-400 font-black' : 'text-slate-500'}">${ing.shortage_count}개</td>
+            <td class="px-6 py-3.5 text-amber-400 font-semibold">${ing.unit_min_price ? ing.unit_min_price.toLocaleString() + ' 데카' : '시세없음'}</td>
+            <td class="px-6 py-3.5 text-right font-black text-slate-100 text-sm">${ing.total_cost ? ing.total_cost.toLocaleString() + ' 데카' : '-'}</td>
+          </tr>
+        `).join('');
+
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function changeCraftCount(delta) {
+      const input = document.getElementById('calc-count-input');
+      let val = (parseInt(input.value) || 1) + delta;
+      if (val < 1) val = 1;
+      input.value = val;
+      recalculateCurrent();
+    }
+
+    async function triggerRefresh() {
+      const btn = document.getElementById('refresh-btn');
+      btn.classList.add('opacity-50', 'pointer-events-none');
+      const startTime = performance.now();
+      try {
+        const res = await fetch('/api/refresh', { method: 'POST' });
+        const data = await res.json();
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+        if (data.success) {
+          await loadPrices();
+          await loadRecipes();
+          if (currentGroupMode) {
+            setCompareGroup(currentGroupMode);
+          } else if (currentSelectedPriceItem) {
+            selectPriceItem(currentSelectedPriceItem);
+          }
+          if (currentSelectedRecipe) recalculateCurrent();
+          alert(`최저가 시세 및 레시피 갱신이 완료되었습니다. (측정 소요시간: ${elapsed}초)`);
+        } else {
+          alert('갱신 실패: ' + data.error);
+        }
+      } catch (e) {
+        alert('서버 통신 실패: ' + e);
+      } finally {
+        btn.classList.remove('opacity-50', 'pointer-events-none');
+      }
+    }
+
+    window.onload = async () => {
+      initChart();
+      await checkStatus();
+      await loadPrices();
+      await loadRecipes();
+      setInterval(checkStatus, 60000);
+      setInterval(loadPrices, 600000);
+    };
+  </script>
+</body>
+</html>

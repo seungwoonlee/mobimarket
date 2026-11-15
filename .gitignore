@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.pdb
+*.db
+*.db-journal
+*.exe
+.env
+.env.*
+.idea/
+.vscode/
