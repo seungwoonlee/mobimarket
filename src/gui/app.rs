@@ -750,6 +750,7 @@ impl MobiMarketApp {
                         });
 
                         egui::ScrollArea::vertical()
+                            .id_salt("market_search_results_scroll")
                             .drag_to_scroll(false)
                             .auto_shrink([false, false])
                             .max_height(180.0)
@@ -879,6 +880,7 @@ impl MobiMarketApp {
                 let list_height = (total_height - upper_overhead).max(430.0);
 
                 egui::ScrollArea::vertical()
+                    .id_salt("market_items_list_scroll")
                     .drag_to_scroll(false)
                     .auto_shrink([false, false])
                     .min_scrolled_height(list_height)
@@ -1236,6 +1238,7 @@ impl MobiMarketApp {
                 if let Some(snaps) = self.snapshots_cache.get(&self.selected_item) {
                     let history_height = (total_height - plot_height - 90.0).max(220.0);
                     egui::ScrollArea::vertical()
+                        .id_salt("market_history_table_scroll")
                         .drag_to_scroll(false)
                         .auto_shrink([false, false])
                         .min_scrolled_height(history_height)
@@ -1403,6 +1406,7 @@ impl MobiMarketApp {
 
                 let left_recipe_height = (total_height - 180.0).max(450.0);
                 egui::ScrollArea::vertical()
+                    .id_salt("craft_recipes_list_scroll")
                     .drag_to_scroll(false)
                     .auto_shrink([false, false])
                     .min_scrolled_height(left_recipe_height)
@@ -1622,6 +1626,7 @@ impl MobiMarketApp {
 
                         let table_height = (total_height - 250.0).max(350.0);
                         egui::ScrollArea::vertical()
+                            .id_salt("craft_materials_table_scroll")
                             .drag_to_scroll(false)
                             .auto_shrink([false, false])
                             .min_scrolled_height(table_height)
