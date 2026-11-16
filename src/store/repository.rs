@@ -85,6 +85,21 @@ impl Database {
             )?;
         }
 
+        // 기존 DB 잔영/해연 장비 ZZ 접미사 마이그레이션 (중복 방지 및 정규화)
+        let _ = conn.execute_batch(
+            r#"
+            DELETE FROM monitored_items 
+            WHERE (item_name LIKE '잔영%' OR item_name LIKE '해연%') 
+              AND item_name NOT LIKE '%ZZ'
+              AND (item_name || 'ZZ') IN (SELECT item_name FROM monitored_items);
+
+            UPDATE monitored_items 
+            SET item_name = item_name || 'ZZ' 
+            WHERE (item_name LIKE '잔영%' OR item_name LIKE '해연%') 
+              AND item_name NOT LIKE '%ZZ';
+            "#,
+        );
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -140,9 +155,22 @@ impl Database {
         Ok(())
     }
 
-    /// 특정 아이템의 최신 스냅샷 조회
+    /// 특정 아이템의 최신 스냅샷 조회 (ZZ 양방향 Fallback 지원)
     pub async fn get_latest_snapshot(&self, item_name: &str) -> Result<Option<SnapshotRecord>> {
         let conn = self.conn.lock().await;
+        if let Some(res) = Self::query_latest_snapshot_inner(&conn, item_name)? {
+            return Ok(Some(res));
+        }
+
+        let alt_name = if item_name.ends_with("ZZ") {
+            item_name.trim_end_matches("ZZ").to_string()
+        } else {
+            format!("{}ZZ", item_name)
+        };
+        Self::query_latest_snapshot_inner(&conn, &alt_name)
+    }
+
+    fn query_latest_snapshot_inner(conn: &Connection, item_name: &str) -> Result<Option<SnapshotRecord>> {
         let mut stmt = conn.prepare(
             r#"
             SELECT id, item_name, rarity, star, season, min_unit_price, in_stock, scraped_at
@@ -197,9 +225,25 @@ impl Database {
         Ok(list)
     }
 
-    /// 특정 아이템의 최근 N개 스냅샷을 시간순(오름차순)으로 조회 (서브쿼리 적용으로 최신 데이터 보장)
+    /// 특정 아이템의 최근 N개 스냅샷을 시간순(오름차순)으로 조회 (서브쿼리 적용 및 ZZ 양방향 Fallback 지원)
     pub async fn get_snapshot_history(&self, item_name: &str, limit: i64) -> Result<Vec<SnapshotRecord>> {
         let conn = self.conn.lock().await;
+        let list = Self::query_snapshot_history_inner(&conn, item_name, limit)?;
+        if !list.is_empty() {
+            return Ok(list);
+        }
+
+        // ZZ 접미사 양방향 Fallback 탐색
+        let alt_name = if item_name.ends_with("ZZ") {
+            item_name.trim_end_matches("ZZ").to_string()
+        } else {
+            format!("{}ZZ", item_name)
+        };
+        let fallback_list = Self::query_snapshot_history_inner(&conn, &alt_name, limit)?;
+        Ok(fallback_list)
+    }
+
+    fn query_snapshot_history_inner(conn: &Connection, item_name: &str, limit: i64) -> Result<Vec<SnapshotRecord>> {
         let mut stmt = conn.prepare(
             r#"
             SELECT id, item_name, rarity, star, season, min_unit_price, in_stock, scraped_at

@@ -215,7 +215,7 @@ impl MobiMarketApp {
                     }
                 }
 
-                // 5. 모니터링 품목 + 모든 레시피 장비의 최신 최저가 및 스냅샷 조회 (잔영/해연 '시세없음' 버그 완전 해결!)
+                // 5. 모니터링 품목 + 모든 레시피 장비의 최신 최저가 및 스냅샷 조회 (ZZ 양방향 인덱싱 적용)
                 let mut all_target_items = self.monitored_items.clone();
                 for r in &self.all_recipes {
                     if !all_target_items.contains(&r.display_name) {
@@ -224,10 +224,22 @@ impl MobiMarketApp {
                 }
                 for name in &all_target_items {
                     if let Ok(snaps) = db.get_snapshot_history(name, 5000).await {
-                        if let Some(last) = snaps.last() {
-                            self.latest_prices.insert(name.clone(), last.min_unit_price);
+                        if !snaps.is_empty() {
+                            if let Some(last) = snaps.last() {
+                                self.latest_prices.insert(name.clone(), last.min_unit_price);
+                                if name.ends_with("ZZ") {
+                                    self.latest_prices.insert(name.trim_end_matches("ZZ").to_string(), last.min_unit_price);
+                                } else {
+                                    self.latest_prices.insert(format!("{}ZZ", name), last.min_unit_price);
+                                }
+                            }
+                            if name.ends_with("ZZ") {
+                                self.snapshots_cache.insert(name.trim_end_matches("ZZ").to_string(), snaps.clone());
+                            } else {
+                                self.snapshots_cache.insert(format!("{}ZZ", name), snaps.clone());
+                            }
+                            self.snapshots_cache.insert(name.clone(), snaps);
                         }
-                        self.snapshots_cache.insert(name.clone(), snaps);
                     }
                 }
 
@@ -365,11 +377,41 @@ impl MobiMarketApp {
         }
     }
 
-    /// 조회 기간(period_days)에 맞춰 필터링된 스냅샷 반환 (0은 전체 기간)
+    /// 캐시된 최신 가격 조회 (ZZ 양방향 호환)
+    pub fn get_cached_price(&self, name: &str) -> Option<i64> {
+        if let Some(p) = self.latest_prices.get(name) {
+            return Some(*p);
+        }
+        if name.ends_with("ZZ") {
+            let alt = name.trim_end_matches("ZZ");
+            if let Some(p) = self.latest_prices.get(alt) {
+                return Some(*p);
+            }
+        } else {
+            let alt = format!("{}ZZ", name);
+            if let Some(p) = self.latest_prices.get(&alt) {
+                return Some(*p);
+            }
+        }
+        None
+    }
+
+    /// 조회 기간(period_days)에 맞춰 필터링된 스냅샷 반환 (ZZ 양방향 호환, 0은 전체 기간)
     fn get_filtered_snapshots<'a>(&'a self, item_name: &str) -> Vec<&'a SnapshotRecord> {
-        let snaps = match self.snapshots_cache.get(item_name) {
-            Some(s) => s,
-            None => return Vec::new(),
+        let snaps = if let Some(s) = self.snapshots_cache.get(item_name) {
+            s
+        } else if item_name.ends_with("ZZ") {
+            let alt = item_name.trim_end_matches("ZZ");
+            match self.snapshots_cache.get(alt) {
+                Some(s) => s,
+                None => return Vec::new(),
+            }
+        } else {
+            let alt = format!("{}ZZ", item_name);
+            match self.snapshots_cache.get(&alt) {
+                Some(s) => s,
+                None => return Vec::new(),
+            }
         };
 
         if self.period_days == 0 {
@@ -889,9 +931,9 @@ impl MobiMarketApp {
                         for name in items_to_show {
                             let is_selected = self.selected_item == name;
 
-                            // 1. 현재 최저가 (거래소 등록 최저가 - D 제외 숫자만)
-                            let cur_price_str = if let Some(p) = self.latest_prices.get(&name) {
-                                format_number(*p)
+                            // 1. 현재 최저가 (거래소 등록 최저가 - D 제외 숫자만, ZZ 호환)
+                            let cur_price_str = if let Some(p) = self.get_cached_price(&name) {
+                                format_number(p)
                             } else {
                                 "-".to_string()
                             };
@@ -1085,9 +1127,9 @@ impl MobiMarketApp {
                                 .size(18.0)
                                 .color(Color32::WHITE),
                         );
-                        if let Some(price) = self.latest_prices.get(&self.selected_item) {
+                        if let Some(price) = self.get_cached_price(&self.selected_item) {
                             ui.label(
-                                RichText::new(format!("현재 최저가: {} 데카", format_number(*price)))
+                                RichText::new(format!("현재 최저가: {} 데카", format_number(price)))
                                     .size(16.0)
                                     .strong()
                                     .color(Color32::from_rgb(250, 190, 80)),
@@ -1179,8 +1221,8 @@ impl MobiMarketApp {
                                     };
 
                                     // 참조표(Legend)에 품목명 + 현재 최저가 동시 표기
-                                    let price_str = if let Some(p) = self.latest_prices.get(item_name) {
-                                        format!("{} 데카", format_number(*p))
+                                    let price_str = if let Some(p) = self.get_cached_price(item_name) {
+                                        format!("{} 데카", format_number(p))
                                     } else {
                                         "시세없음".to_string()
                                     };
@@ -1208,8 +1250,8 @@ impl MobiMarketApp {
                                     .map(|(i, s)| [i as f64, s.min_unit_price as f64])
                                     .collect();
 
-                                let price_str = if let Some(p) = self.latest_prices.get(&self.selected_item) {
-                                    format!("{} 데카", format_number(*p))
+                                let price_str = if let Some(p) = self.get_cached_price(&self.selected_item) {
+                                    format!("{} 데카", format_number(p))
                                 } else {
                                     "시세없음".to_string()
                                 };
@@ -1228,14 +1270,15 @@ impl MobiMarketApp {
                 ui.add_space(6.0);
                 ui.separator();
 
-                // 하단: 최근 스냅샷 히스토리 테이블
+                // 하단: 최근 스냅샷 히스토리 테이블 (ZZ 호환 get_filtered_snapshots 적용)
                 ui.label(
                     RichText::new(format!("최근 최저가 수집 기록 - {}", self.selected_item))
                         .size(13.0)
                         .strong(),
                 );
 
-                if let Some(snaps) = self.snapshots_cache.get(&self.selected_item) {
+                let snaps_list = self.get_filtered_snapshots(&self.selected_item);
+                if !snaps_list.is_empty() {
                     let history_height = (total_height - plot_height - 90.0).max(220.0);
                     egui::ScrollArea::vertical()
                         .id_salt("market_history_table_scroll")
@@ -1253,7 +1296,7 @@ impl MobiMarketApp {
                                     ui.label(RichText::new("재고 상태").strong().color(Color32::GRAY));
                                     ui.end_row();
 
-                                    for s in snaps.iter().rev().take(15) {
+                                    for s in snaps_list.iter().rev().take(15) {
                                         let stock_str = if s.in_stock { "재고있음" } else { "품절" };
                                         let stock_color = if s.in_stock {
                                             Color32::from_rgb(120, 220, 140)
