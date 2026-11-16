@@ -545,12 +545,12 @@ impl eframe::App for MobiMarketApp {
                         }
                     }
 
-                    // 남은 시간 카운트다운
+                    // 남은 시간 카운트다운 (남은 분/초 명확화)
                     let rem_secs = self.collector.remaining_secs.load(Ordering::Relaxed);
                     let min = rem_secs / 60;
                     let sec = rem_secs % 60;
                     ui.label(
-                        RichText::new(format!("다음 수집: {:02}:{:02}", min, sec))
+                        RichText::new(format!("다음 수집: {:02}분 {:02}초 후", min, sec))
                             .size(12.0)
                             .color(Color32::from_rgb(160, 200, 255)),
                     );

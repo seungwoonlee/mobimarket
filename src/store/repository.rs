@@ -100,6 +100,20 @@ impl Database {
             "#,
         );
 
+        // 마이그레이션 v1: 기존 UTC 저장 스냅샷을 OS 로컬 시간(KST)으로 1회 안전 보정 (user_version으로 멱등성 보장)
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+        if version < 1 {
+            let _ = conn.execute_batch(
+                r#"
+                UPDATE market_snapshots 
+                SET scraped_at = datetime(scraped_at, 'localtime')
+                WHERE scraped_at IS NOT NULL;
+
+                PRAGMA user_version = 1;
+                "#,
+            );
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -134,7 +148,7 @@ impl Database {
         Ok(())
     }
 
-    /// 시세 스냅샷 단건 저장
+    /// 시세 스냅샷 단건 저장 (OS 로컬 타임존 KST 기준)
     pub async fn insert_snapshot(
         &self,
         item_name: &str,
@@ -145,12 +159,13 @@ impl Database {
         in_stock: bool,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
+        let now_local = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         conn.execute(
             r#"
             INSERT INTO market_snapshots (item_name, rarity, star, season, min_unit_price, in_stock, scraped_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
-            params![item_name, rarity, star, season, min_unit_price, in_stock as i64],
+            params![item_name, rarity, star, season, min_unit_price, in_stock as i64, now_local],
         )?;
         Ok(())
     }
