@@ -99,9 +99,14 @@ impl EquipmentSlot {
 
 /// 아이템 이름으로 장비 부위 판별
 /// - 장신구는 오직 '네크리스'와 '링' 2가지뿐임!
-/// - 완드 등 무기류는 절대 장신구로 분류되지 않음.
+/// - '마블 힐링 완드' 등 '힐링'이 포함된 아이템이 '링'으로 오분류되지 않도록 방어
 pub fn get_equipment_slot(name: &str) -> EquipmentSlot {
-    if name.contains("네크리스") || name.contains("링") {
+    let is_ring = name.contains(" 링")
+        || name.ends_with("링ZZ")
+        || name.ends_with("링")
+        || (name.contains("링") && !name.contains("힐링"));
+
+    if name.contains("네크리스") || is_ring {
         EquipmentSlot::Accessory
     } else if name.contains("갑옷") || name.contains("전투복") || name.contains("상의")
         || name.contains("하의") || name.contains("투구") || name.contains("장갑") || name.contains("신발")
@@ -128,7 +133,11 @@ pub fn is_job_equipment(job_name: &str, item_name: &str) -> bool {
 
     // 1. 장신구 (네크리스, 링 2종류만 전 직업 공용)
     if slot == EquipmentSlot::Accessory {
-        return item_name.contains("네크리스") || item_name.contains("링");
+        let is_ring = item_name.contains(" 링")
+            || item_name.ends_with("링ZZ")
+            || item_name.ends_with("링")
+            || (item_name.contains("링") && !item_name.contains("힐링"));
+        return item_name.contains("네크리스") || is_ring;
     }
 
     let job = job_name.trim();

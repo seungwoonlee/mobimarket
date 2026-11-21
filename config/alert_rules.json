@@ -1,0 +1,26 @@
+[
+  {
+    "item_name": "마력 깃든 용비늘",
+    "condition": "<=",
+    "target_price": 320000,
+    "cooldown_mins": 30
+  },
+  {
+    "item_name": "허상의 마력석",
+    "condition": "<=",
+    "target_price": 105,
+    "cooldown_mins": 30
+  },
+  {
+    "item_name": "포식의 마력석",
+    "condition": "<=",
+    "target_price": 115,
+    "cooldown_mins": 30
+  },
+  {
+    "item_name": "심해의 마력석",
+    "condition": "<=",
+    "target_price": 270,
+    "cooldown_mins": 30
+  }
+]

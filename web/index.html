@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MobiMarket 인터랙티브 시세 & 제작 마진 시뮬레이터</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { background-color: #121316; color: #E5E7EB; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Malgun Gothic", sans-serif; }
+    .card { background-color: #1A1C23; border: 1px solid #2D3139; }
+    .gold-text { color: #E5A93C; }
+    .blue-accent { color: #58A6FF; }
+    .green-profit { color: #3FB950; }
+    .red-loss { color: #F85149; }
+    input[type=range] { accent-color: #E5A93C; }
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-7xl mx-auto space-y-6">
+    
+    <!-- 상단 헤더 -->
+    <header class="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-gray-800 gap-4">
+      <div>
+        <div class="flex items-center gap-3">
+          <span class="text-2xl font-bold tracking-tight gold-text">⚡ MobiMarket</span>
+          <span class="px-2 py-0.5 text-xs rounded bg-gray-800 text-gray-300 border border-gray-700">인터랙티브 웹 시뮬레이터</span>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">마비노기 모바일 거래소 실시간 시세 시계열 차트 & 대성공/수수료 반영 제작 마진 시뮬레이터</p>
+      </div>
+      <div class="flex items-center gap-3 text-xs text-gray-400">
+        <span id="data-status-badge" class="px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">● 로컬 실시간 데이터 연동됨</span>
+        <button onclick="refreshData()" class="px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600 transition">새로고침</button>
+      </div>
+    </header>
+
+    <!-- 대시보드 2열 레이아웃 -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      
+      <!-- 좌측 7열: 시세 차트 & 히스토리 -->
+      <div class="lg:col-span-7 space-y-4">
+        <div class="card p-5 rounded-xl shadow-lg">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <h2 class="text-base font-semibold text-white flex items-center gap-2">
+              <span>📈</span> 품목별 시세 추이 차트
+            </h2>
+            <div class="flex items-center gap-2">
+              <select id="item-select" onchange="renderChart()" class="bg-gray-900 border border-gray-700 text-xs rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-amber-500">
+                <!-- JS 자동 채움 -->
+              </select>
+            </div>
+          </div>
+          
+          <!-- 요약 카드 3종 -->
+          <div class="grid grid-cols-3 gap-3 mb-4 text-center">
+            <div class="bg-gray-900/60 p-2.5 rounded-lg border border-gray-800">
+              <div class="text-[11px] text-gray-400">현재 최저가</div>
+              <div id="stat-current" class="text-base font-bold gold-text mt-0.5">-</div>
+            </div>
+            <div class="bg-gray-900/60 p-2.5 rounded-lg border border-gray-800">
+              <div class="text-[11px] text-gray-400">기간 최저점</div>
+              <div id="stat-min" class="text-base font-bold blue-accent mt-0.5">-</div>
+            </div>
+            <div class="bg-gray-900/60 p-2.5 rounded-lg border border-gray-800">
+              <div class="text-[11px] text-gray-400">기간 최고점</div>
+              <div id="stat-max" class="text-base font-bold text-rose-400 mt-0.5">-</div>
+            </div>
+          </div>
+
+          <!-- Chart.js 캔버스 -->
+          <div class="h-64 relative">
+            <canvas id="priceChart"></canvas>
+          </div>
+        </div>
+
+        <!-- 실시간 시세 테이블 요약 -->
+        <div class="card p-4 rounded-xl shadow-lg">
+          <h3 class="text-xs font-semibold text-gray-300 mb-3 flex items-center gap-1.5">
+            <span>📋</span> 주요 관심 품목 실시간 현황
+          </h3>
+          <div class="max-h-48 overflow-y-auto">
+            <table class="w-full text-left text-xs">
+              <thead class="text-gray-400 bg-gray-900/50 sticky top-0">
+                <tr>
+                  <th class="py-1.5 px-2">품목명</th>
+                  <th class="py-1.5 px-2 text-right">현재가 (데카)</th>
+                  <th class="py-1.5 px-2 text-center">재고</th>
+                </tr>
+              </thead>
+              <tbody id="quick-price-table" class="divide-y divide-gray-800">
+                <!-- JS 채움 -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 우측 5열: 제작 아이템 마진 계산기 -->
+      <div class="lg:col-span-5 space-y-4">
+        <div class="card p-5 rounded-xl shadow-lg">
+          <h2 class="text-base font-semibold text-white flex items-center gap-2 mb-4">
+            <span>🔨</span> 제작 마진 시뮬레이터 (What-if)
+          </h2>
+
+          <!-- 레시피 선택 -->
+          <div class="mb-4">
+            <label class="block text-xs text-gray-400 mb-1">제작 대상 아이템 선택</label>
+            <select id="recipe-select" onchange="loadRecipe()" class="w-full bg-gray-900 border border-gray-700 text-xs rounded-lg px-3 py-2 text-white focus:outline-none focus:border-amber-500">
+              <!-- JS 채움 -->
+            </select>
+          </div>
+
+          <!-- 확률 및 수수료 슬라이더 -->
+          <div class="bg-gray-900/40 p-3.5 rounded-lg border border-gray-800 space-y-3 mb-4 text-xs">
+            <div>
+              <div class="flex justify-between mb-1">
+                <span class="text-gray-400">제작 성공 확률: <b id="val-success" class="text-white">50%</b></span>
+                <span class="text-gray-500 text-[10px]">기본 게임 확률</span>
+              </div>
+              <input type="range" id="slider-success" min="10" max="100" value="50" class="w-full h-1.5 bg-gray-700 rounded-lg cursor-pointer" oninput="recalc()">
+            </div>
+            <div>
+              <div class="flex justify-between mb-1">
+                <span class="text-gray-400">대성공 확률 (+1개 추가): <b id="val-critical" class="text-white">12%</b></span>
+                <span class="text-gray-500 text-[10px]">보너스 생산</span>
+              </div>
+              <input type="range" id="slider-critical" min="0" max="50" value="12" class="w-full h-1.5 bg-gray-700 rounded-lg cursor-pointer" oninput="recalc()">
+            </div>
+            <div>
+              <div class="flex justify-between mb-1">
+                <span class="text-gray-400">거래소 판매 수수료: <b id="val-fee" class="text-white">10%</b></span>
+              </div>
+              <input type="range" id="slider-fee" min="0" max="20" value="10" class="w-full h-1.5 bg-gray-700 rounded-lg cursor-pointer" oninput="recalc()">
+            </div>
+          </div>
+
+          <!-- 필요 재료 목록 및 가격 인풋 -->
+          <div class="mb-4">
+            <div class="text-xs font-semibold text-gray-300 mb-2 flex justify-between">
+              <span>필요 재료 및 단가</span>
+              <span class="text-[10px] text-gray-400">* 시세 자동 반영 / 수정 가능</span>
+            </div>
+            <div id="ingredients-container" class="space-y-2 text-xs max-h-40 overflow-y-auto pr-1">
+              <!-- JS 채움 -->
+            </div>
+          </div>
+
+          <!-- 손익 계산 결과 요약 카드 -->
+          <div class="card p-4 rounded-xl border border-gray-700 bg-gray-900/90 space-y-2.5">
+            <div class="flex justify-between text-xs text-gray-400">
+              <span>1회 제작당 기대 재료비:</span>
+              <span id="res-material-cost" class="font-semibold text-gray-200">0 데카</span>
+            </div>
+            <div class="flex justify-between text-xs text-gray-400">
+              <span>기대 완제품 산출량:</span>
+              <span id="res-expected-yield" class="font-semibold text-gray-200">0.00 개</span>
+            </div>
+            <div class="flex justify-between text-xs text-gray-400">
+              <span>완제품 판매 예상가 (개당):</span>
+              <span id="res-market-price" class="font-semibold gold-text">0 데카</span>
+            </div>
+            <div class="pt-2 border-t border-gray-800 flex justify-between items-center">
+              <span class="text-sm font-semibold text-gray-300">1회 시도당 기대 순익:</span>
+              <div class="text-right">
+                <div id="res-net-profit" class="text-lg font-bold green-profit">+0 데카</div>
+                <div id="res-roi" class="text-xs text-gray-400">수익률: 0%</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    // 기본 내장 샘플 데이터 (파일 로드 실패 시 오프라인 Fallback)
+    let marketData = {
+      latest_items: [
+        { name: "마력 깃든 용비늘", price: 331833, in_stock: true },
+        { name: "허상의 마력석", price: 108, in_stock: true },
+        { name: "포식의 마력석", price: 121, in_stock: true },
+        { name: "심해의 마력석", price: 275, in_stock: true },
+        { name: "공명의 영혼석", price: 18, in_stock: true },
+        { name: "파동의 영혼석", price: 17, in_stock: true },
+        { name: "망령의 영혼석", price: 24, in_stock: true },
+        { name: "백금강괴", price: 4500, in_stock: true },
+        { name: "최상급 가죽+", price: 3200, in_stock: true },
+        { name: "야생의 영혼석", price: 15, in_stock: true },
+        { name: "잔영의 샤프 듀얼소드ZZ", price: 85000, in_stock: true },
+        { name: "잔영의 마블 힐링 완드ZZ", price: 92000, in_stock: true },
+        { name: "잔영의 라이트 크로스보우ZZ", price: 78000, in_stock: true }
+      ],
+      history: {
+        "마력 깃든 용비늘": [
+          { price: 331833, time: "11-15 10:00" },
+          { price: 325000, time: "11-15 10:20" },
+          { price: 316893, time: "11-15 10:47" },
+          { price: 316893, time: "11-15 11:00" },
+          { price: 331833, time: "11-15 12:00" },
+          { price: 331833, time: "11-15 13:04" }
+        ]
+      },
+      recipes: [
+        {
+          name: "잔영의 샤프 듀얼소드ZZ",
+          produced: 1,
+          success_rate: 50.0,
+          critical_rate: 12.0,
+          ingredients: [
+            { DisplayName: "백금강괴", Required: 3 },
+            { DisplayName: "최상급 가죽+", Required: 3 },
+            { DisplayName: "망령의 영혼석", Required: 9 },
+            { DisplayName: "야생의 영혼석", Required: 15 },
+            { DisplayName: "공명의 영혼석", Required: 16 }
+          ]
+        },
+        {
+          name: "잔영의 마블 힐링 완드ZZ",
+          produced: 1,
+          success_rate: 50.0,
+          critical_rate: 12.0,
+          ingredients: [
+            { DisplayName: "백금강괴", Required: 3 },
+            { DisplayName: "최상급 목재+", Required: 3 },
+            { DisplayName: "망령의 영혼석", Required: 9 },
+            { DisplayName: "야생의 영혼석", Required: 15 },
+            { DisplayName: "공명의 영혼석", Required: 16 }
+          ]
+        }
+      ]
+    };
+
+    let chartInstance = null;
+
+    async function init() {
+      try {
+        const resp = await fetch("market_data.json");
+        if (resp.ok) {
+          const loaded = await resp.json();
+          if (loaded.latest_items && loaded.latest_items.length > 0) {
+            marketData = loaded;
+            document.getElementById("data-status-badge").innerText = "● 로컬 SQLite 데이터 연동됨 (" + marketData.latest_items.length + "개 품목)";
+          }
+        }
+      } catch (e) {
+        console.log("로컬 정적 모드로 구동 중:", e);
+      }
+
+      populateItemSelect();
+      populateRecipeSelect();
+      populateQuickTable();
+      renderChart();
+      loadRecipe();
+    }
+
+    function populateItemSelect() {
+      const sel = document.getElementById("item-select");
+      sel.innerHTML = "";
+      const items = Object.keys(marketData.history);
+      const list = items.length > 0 ? items : marketData.latest_items.map(i => i.name);
+      list.forEach(name => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.innerText = name;
+        sel.appendChild(opt);
+      });
+      if (list.includes("마력 깃든 용비늘")) sel.value = "마력 깃든 용비늘";
+    }
+
+    function populateRecipeSelect() {
+      const sel = document.getElementById("recipe-select");
+      sel.innerHTML = "";
+      marketData.recipes.forEach(r => {
+        const opt = document.createElement("option");
+        opt.value = r.name;
+        opt.innerText = r.name;
+        sel.appendChild(opt);
+      });
+    }
+
+    function populateQuickTable() {
+      const tbody = document.getElementById("quick-price-table");
+      tbody.innerHTML = "";
+      marketData.latest_items.slice(0, 15).forEach(item => {
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-gray-800/40 cursor-pointer";
+        tr.onclick = () => {
+          document.getElementById("item-select").value = item.name;
+          renderChart();
+        };
+        tr.innerHTML = `
+          <td class="py-1.5 px-2 text-gray-200">${item.name}</td>
+          <td class="py-1.5 px-2 text-right font-medium gold-text">${Number(item.price).toLocaleString()}</td>
+          <td class="py-1.5 px-2 text-center ${item.in_stock ? 'text-emerald-400' : 'text-gray-500'}">${item.in_stock ? '재고있음' : '품절'}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderChart() {
+      const itemName = document.getElementById("item-select").value;
+      const history = marketData.history[itemName] || [];
+
+      let labels = [];
+      let data = [];
+      if (history.length > 0) {
+        labels = history.map(h => (h.time || "").split(" ")[1] || h.time);
+        data = history.map(h => h.price);
+      } else {
+        const item = marketData.latest_items.find(i => i.name === itemName);
+        const p = item ? item.price : 10000;
+        labels = ["09:00", "10:00", "11:00", "12:00", "현재"];
+        data = [p, p, p, p, p];
+      }
+
+      const curPrice = data[data.length - 1] || 0;
+      const minPrice = Math.min(...data);
+      const maxPrice = Math.max(...data);
+
+      document.getElementById("stat-current").innerText = Number(curPrice).toLocaleString() + " 데카";
+      document.getElementById("stat-min").innerText = Number(minPrice).toLocaleString() + " 데카";
+      document.getElementById("stat-max").innerText = Number(maxPrice).toLocaleString() + " 데카";
+
+      const ctx = document.getElementById("priceChart").getContext("2d");
+      if (chartInstance) chartInstance.destroy();
+
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: itemName,
+            data: data,
+            borderColor: '#E5A93C',
+            backgroundColor: 'rgba(229, 169, 60, 0.1)',
+            borderWidth: 2,
+            tension: 0.15,
+            fill: true,
+            pointRadius: 3,
+            pointHoverRadius: 6,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => `${ctx.parsed.y.toLocaleString()} 데카`
+              }
+            }
+          },
+          scales: {
+            x: { grid: { color: '#22252B' }, ticks: { color: '#888', font: { size: 10 } } },
+            y: { grid: { color: '#22252B' }, ticks: { color: '#888', font: { size: 10 } } }
+          }
+        }
+      });
+    }
+
+    function loadRecipe() {
+      const recName = document.getElementById("recipe-select").value;
+      const recipe = marketData.recipes.find(r => r.name === recName);
+      if (!recipe) return;
+
+      document.getElementById("slider-success").value = recipe.success_rate || 50;
+      document.getElementById("slider-critical").value = recipe.critical_rate || 12;
+      document.getElementById("val-success").innerText = (recipe.success_rate || 50) + "%";
+      document.getElementById("val-critical").innerText = (recipe.critical_rate || 12) + "%";
+
+      const cont = document.getElementById("ingredients-container");
+      cont.innerHTML = "";
+      recipe.ingredients.forEach((ing, idx) => {
+        const itemInfo = marketData.latest_items.find(i => i.name === ing.DisplayName);
+        const defaultPrice = itemInfo ? itemInfo.price : 100;
+
+        const row = document.createElement("div");
+        row.className = "flex items-center justify-between gap-2 p-1.5 rounded bg-gray-900/60 border border-gray-800";
+        row.innerHTML = `
+          <div class="flex-1 truncate">
+            <span class="text-gray-200 font-medium">${ing.DisplayName}</span>
+            <span class="text-amber-400 ml-1">x${ing.Required}</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <input type="number" id="ing-price-${idx}" data-req="${ing.Required}" value="${defaultPrice}"
+                   class="w-20 bg-gray-950 border border-gray-700 text-right px-1.5 py-0.5 rounded text-white text-xs focus:border-amber-500"
+                   oninput="recalc()">
+            <span class="text-[10px] text-gray-500">데카</span>
+          </div>
+        `;
+        cont.appendChild(row);
+      });
+
+      recalc();
+    }
+
+    function recalc() {
+      const succ = parseFloat(document.getElementById("slider-success").value);
+      const crit = parseFloat(document.getElementById("slider-critical").value);
+      const feeRate = parseFloat(document.getElementById("slider-fee").value) / 100.0;
+
+      document.getElementById("val-success").innerText = succ + "%";
+      document.getElementById("val-critical").innerText = crit + "%";
+      document.getElementById("val-fee").innerText = (feeRate * 100).toFixed(0) + "%";
+
+      // 재료비 합산
+      let totalMatCost = 0;
+      const inputs = document.querySelectorAll("[id^='ing-price-']");
+      inputs.forEach(inp => {
+        const req = parseFloat(inp.getAttribute("data-req"));
+        const price = parseFloat(inp.value) || 0;
+        totalMatCost += req * price;
+      });
+
+      // 완제품 산출 기대치: (성공확률) * 1 + (성공 중 대성공 확률) * 1
+      const pSuccess = succ / 100.0;
+      const pCritical = (succ / 100.0) * (crit / 100.0);
+      const expectedYield = pSuccess + pCritical;
+
+      // 완제품 거래소 최저가
+      const recName = document.getElementById("recipe-select").value;
+      const targetItem = marketData.latest_items.find(i => i.name === recName);
+      const marketPrice = targetItem ? targetItem.price : (totalMatCost * 1.5);
+
+      // 기대 판매 순익 = 기대산출량 * 판매가 * (1 - 수수료) - 재료비
+      const expectedRevenue = expectedYield * marketPrice * (1.0 - feeRate);
+      const netProfit = expectedRevenue - totalMatCost;
+      const roi = totalMatCost > 0 ? (netProfit / totalMatCost) * 100.0 : 0;
+
+      document.getElementById("res-material-cost").innerText = Math.round(totalMatCost).toLocaleString() + " 데카";
+      document.getElementById("res-expected-yield").innerText = expectedYield.toFixed(2) + " 개";
+      document.getElementById("res-market-price").innerText = Math.round(marketPrice).toLocaleString() + " 데카";
+
+      const profitEl = document.getElementById("res-net-profit");
+      const roiEl = document.getElementById("res-roi");
+
+      if (netProfit >= 0) {
+        profitEl.innerText = "+" + Math.round(netProfit).toLocaleString() + " 데카";
+        profitEl.className = "text-lg font-bold green-profit";
+        roiEl.innerText = `수익률: +${roi.toFixed(1)}% (이득)`;
+        roiEl.className = "text-xs text-emerald-400";
+      } else {
+        profitEl.innerText = Math.round(netProfit).toLocaleString() + " 데카";
+        profitEl.className = "text-lg font-bold red-loss";
+        roiEl.innerText = `수익률: ${roi.toFixed(1)}% (손실)`;
+        roiEl.className = "text-xs text-rose-400";
+      }
+    }
+
+    function refreshData() {
+      init();
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>

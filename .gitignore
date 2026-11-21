@@ -8,3 +8,5 @@
 .env.*
 .idea/
 .vscode/
+data/alert_state.json
+web/market_data.json

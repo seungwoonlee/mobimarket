@@ -1,0 +1,12 @@
+{
+  "name": "mobimarket-plugin",
+  "version": "1.0.0",
+  "description": "마비노기 모바일 거래소 실시간 시세 조회 및 제작 마진 계산 Antigravity MCP 플러그인",
+  "author": "承雲",
+  "mcpServers": {
+    "mobimarket": {
+      "command": "python",
+      "args": ["plugins/mobimarket/server.py"]
+    }
+  }
+}

@@ -8,14 +8,14 @@
 
 <br/>
 
-[![최신 버전](https://img.shields.io/badge/Release-v1.0.4_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.4)
-[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.4/mobi_market.exe)
+[![최신 버전](https://img.shields.io/badge/Release-v1.0.5_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.5)
+[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.5/mobi_market.exe)
 [![초고속 엔진](https://img.shields.io/badge/Engine-Rust_초고속_가벼움-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![라이선스](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 <br/>
 
-<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.4/mobi_market.exe">
+<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.5/mobi_market.exe">
   <img src="https://img.shields.io/badge/👉_지금_바로_최신버전_다운로드_(mobi__market.exe)-%23E0443E?style=for-the-badge&logo=windows&logoColor=white" height="45" alt="다운로드 버튼"/>
 </a>
 
@@ -160,6 +160,17 @@ cargo build --release
 - **차트**: `egui_plot`
 - **로컬 스토리지**: `rusqlite` (SQLite3 WAL 모드, 자동 멱등성 마이그레이션 탑재)
 - **프로세스 통신**: Windows 로컬 파이프 인터페이스
+
+### 🚀 파워 유저를 위한 4대 에코시스템 확장 도구
+MobiMarket의 고속 SQLite 데이터베이스를 레버리지하는 파워 유저용 도구가 함께 포함되어 있습니다:
+1. **인터랙티브 웹 시뮬레이터 (`web/index.html`)**:
+   - `python scripts/export_market_json.py` 실행 후 `web/index.html`을 브라우저에서 열면 Chart.js 기반 시세 차트와 슬라이더 기반 제작 손익/ROI 시뮬레이터를 이용할 수 있습니다.
+2. **스마트 시세 감시 & 3중 알림 스케줄러 (`scripts/price_monitor.py`)**:
+   - 목표가(상/하한선) 도달 시 디스코드 웹훅 + Home Assistant 홈미니(50% 볼륨) + Todoist로 동시 자동 알림 발송 (`python scripts/price_monitor.py`).
+3. **시계열 & 최적 매수 타이밍 분석 (`scripts/analyze_trends.py` & `notebooks/market_trend_analysis.ipynb`)**:
+   - 볼린저 밴드(20, 2σ)와 시간대별 시세 분석을 통해 최저가 집중 시간대(골든 타임) 및 분할 매수 타이밍 도출.
+4. **Antigravity AI MCP 도구 서버 (`plugins/mobimarket/`)**:
+   - 에이전트가 마비노기 거래소 실시간 시세 조회 및 제작 마진을 즉시 계산할 수 있는 공식 MCP 플러그인.
 </details>
 
 <br/>
