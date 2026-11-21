@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -73,6 +74,12 @@ impl Database {
                 item_name TEXT PRIMARY KEY,
                 group_name TEXT,
                 added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- 4. 사용자 관심 장비/아이템 찜(Favorites) 테이블
+            CREATE TABLE IF NOT EXISTS favorites (
+                item_name TEXT PRIMARY KEY,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             "#,
         )?;
@@ -362,5 +369,40 @@ impl Database {
         }
 
         Ok(list)
+    }
+
+    /// 관심 장비/아이템 찜(Favorites) 추가
+    pub async fn add_favorite(&self, item_name: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO favorites (item_name, created_at)
+            VALUES (?1, CURRENT_TIMESTAMP)
+            "#,
+            params![item_name],
+        )?;
+        Ok(())
+    }
+
+    /// 관심 장비/아이템 찜(Favorites) 제거
+    pub async fn remove_favorite(&self, item_name: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM favorites WHERE item_name = ?1",
+            params![item_name],
+        )?;
+        Ok(())
+    }
+
+    /// 전체 찜(Favorites) 목록 조회
+    pub async fn get_all_favorites(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT item_name FROM favorites ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
     }
 }

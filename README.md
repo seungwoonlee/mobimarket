@@ -8,14 +8,14 @@
 
 <br/>
 
-[![최신 버전](https://img.shields.io/badge/Release-v1.0.9_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.9)
-[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.9/mobi_market.exe)
+[![최신 버전](https://img.shields.io/badge/Release-v1.1.0_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.1.0)
+[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.1.0/mobi_market.exe)
 [![초고속 엔진](https://img.shields.io/badge/Engine-Rust_초고속_가벼움-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![라이선스](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 <br/>
 
-<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.9/mobi_market.exe">
+<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.1.0/mobi_market.exe">
   <img src="https://img.shields.io/badge/👉_지금_바로_최신버전_다운로드_(mobi__market.exe)-%23E0443E?style=for-the-badge&logo=windows&logoColor=white" height="45" alt="다운로드 버튼"/>
 </a>
 
@@ -50,10 +50,10 @@
       </p>
     </td>
     <td width="33%" align="center" valign="top">
-      <h3>📊 3. 추세 & 예약구매 조언</h3>
-      <p><b>"지금 살까? 예약구매 걸어둘까?"</b></p>
+      <h3>⭐ 3. 내 관심 장비 찜 & 스펙업 플래너</h3>
+      <p><b>"내 목표 장비 풀세트 맞추려면 얼마 필요할까?"</b></p>
       <p align="left">
-        마비노기 모바일의 캐릭터 귀속과 예약구매 시스템에 맞춰 <b>상승/하향 추세 진단, 7일 가격 범위, 최적의 예약구매 추천가 및 절감률</b>을 시급성 순서로 딱 정렬해 줘요!
+        사고 싶은 무기, 방어구, 장신구 옆의 <b>☆ 버튼만 콕 누르면 찜 목록에 쏙!</b> 풀세트 맞추는 데 필요한 <b>총 데카 견적과 7일 최저가 바닥권 도달 여부</b>를 실시간으로 계산해 줘요!
       </p>
     </td>
   </tr>
@@ -125,6 +125,15 @@
 <blockquote>
 <b>대한민국 한국 표준시(KST)</b> 기준으로 정확하게 기록돼요!<br/>
 상단 헤더의 <code>다음 수집: 09분 41초 후</code> 안내를 통해 다음 자동 갱신까지 몇 분 남았는지 쉽게 알 수 있어요.
+</blockquote>
+</details>
+
+<details>
+<summary><b>⚠️ Q. [분석] 탭의 예측 가격이나 추천 액션을 100% 믿고 거래해도 되나요?</b></summary>
+<br/>
+<blockquote>
+<b>절대 맹신하지 마세요! 순수 재미와 호기심으로 만든 통계 참고용 시스템입니다.</b><br/>
+게임 내 시세는 패치, 유저들의 심리, 공급량에 따라 실시간으로 급변합니다. [분석] 탭의 지표는 과거 7일 데이터에 기반한 재미용 통계일 뿐이므로, 실제 데카를 사용하는 구매나 예약구매 결정은 반드시 본인의 판단에 따라 신중하게 결정해 주세요!
 </blockquote>
 </details>
 

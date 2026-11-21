@@ -9,7 +9,7 @@ use crate::config::{
 use crate::store::{Database, RecipeRecord, SnapshotRecord};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -22,6 +22,7 @@ pub enum MainTab {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ItemGroup {
+    Favorites,
     All,
     HighValue,
     MagicStones,
@@ -36,6 +37,7 @@ pub enum ItemGroup {
 impl ItemGroup {
     pub fn label(&self) -> &'static str {
         match self {
+            ItemGroup::Favorites => "⭐ 찜 목록",
             ItemGroup::All => "전체",
             ItemGroup::HighValue => "고가템",
             ItemGroup::MagicStones => "마력석",
@@ -99,9 +101,8 @@ pub struct MobiMarketApp {
     has_shown_ai_connector_popup: bool,
     ai_connector_retry_failed: bool,
 
-    // [시세 추세 & 예약구매 권장가 분석 탭 상태]
-    timing_selected_group: ItemGroup,
-    timing_action_filter: String,
+    // [찜(즐겨찾기) 캐시]
+    favorites: HashSet<String>,
 
     // 마지막 갱신 틱 카운터
     last_refresh_tick: std::time::Instant,
@@ -147,11 +148,10 @@ impl MobiMarketApp {
             craft_consider_critical: false, // 사용자 요청: 대성공 감안 기본 OFF
             cost_calculation: None,
             all_recipes: Vec::new(),
+            favorites: HashSet::new(),
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
-            timing_selected_group: ItemGroup::All,
-            timing_action_filter: "전체".to_string(),
             last_refresh_tick: std::time::Instant::now(),
         };
 
@@ -250,7 +250,12 @@ impl MobiMarketApp {
                     }
                 }
 
-                // 6. 제작 계산 갱신
+                // 6. 찜(Favorites) 목록 로드
+                if let Ok(favs) = db.get_all_favorites().await {
+                    self.favorites = favs;
+                }
+
+                // 7. 제작 계산 갱신
                 self.recalculate_cost();
             });
         });
@@ -338,9 +343,48 @@ impl MobiMarketApp {
         });
     }
 
+    /// 관심 장비/아이템 찜(Favorites) 여부 확인 (ZZ 접미사 양방향 대응)
+    pub fn is_favorite(&self, item_name: &str) -> bool {
+        self.favorites.contains(item_name)
+            || self.favorites.contains(&format!("{}ZZ", item_name))
+            || self.favorites.contains(item_name.trim_end_matches("ZZ"))
+    }
+
+    /// 관심 장비/아이템 찜(Favorites) 토글 (메모리 및 DB 즉시 반영)
+    pub fn toggle_favorite(&mut self, item_name: &str) {
+        let is_fav = self.is_favorite(item_name);
+        let name = item_name.to_string();
+        let db = self.db.clone();
+
+        if is_fav {
+            self.favorites.remove(&name);
+            self.favorites.remove(&format!("{}ZZ", name));
+            self.favorites.remove(name.trim_end_matches("ZZ"));
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let _ = db.remove_favorite(&name).await;
+                    let _ = db.remove_favorite(&format!("{}ZZ", name)).await;
+                    let _ = db.remove_favorite(name.trim_end_matches("ZZ")).await;
+                });
+            });
+        } else {
+            self.favorites.insert(name.clone());
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let _ = db.add_favorite(&name).await;
+                });
+            });
+        }
+    }
+
     /// 현재 선택된 그룹의 아이템 목록 반환
     fn get_group_items(&self, group: ItemGroup) -> Vec<String> {
         match group {
+            ItemGroup::Favorites => {
+                let mut list: Vec<String> = self.favorites.iter().cloned().collect();
+                list.sort();
+                list
+            }
             ItemGroup::All => self.monitored_items.clone(),
             ItemGroup::HighValue => GROUP_HIGH_VALUE.iter().map(|s| s.to_string()).collect(),
             ItemGroup::MagicStones => GROUP_MAGIC_STONES.iter().map(|s| s.to_string()).collect(),
@@ -634,7 +678,7 @@ impl eframe::App for MobiMarketApp {
                 ui.selectable_value(
                     &mut self.active_tab,
                     MainTab::TimingAnalysis,
-                    RichText::new("  [분석] 추세 & 예약구매 조언  ")
+                    RichText::new("  ⭐ [플래너] 내 찜 & 스펙업 견적  ")
                         .size(15.0)
                         .strong()
                         .color(Color32::from_rgb(255, 215, 80)),
@@ -757,6 +801,7 @@ impl MobiMarketApp {
                 ui.label(RichText::new("품목 그룹 선택").size(12.0).color(Color32::GRAY));
                 ui.horizontal_wrapped(|ui| {
                     for grp in &[
+                        ItemGroup::Favorites,
                         ItemGroup::All,
                         ItemGroup::HighValue,
                         ItemGroup::MagicStones,
@@ -909,9 +954,16 @@ impl MobiMarketApp {
                 let h_base_x = h_rect.min.x;
                 let h_center_y = h_rect.center().y;
 
-                // 컬럼 1: 품목명 (여유 너비 ~350px 확보)
+                // 컬럼 1: 찜 & 품목명 (여유 너비 ~350px 확보)
                 ui.painter().text(
-                    egui::pos2(h_base_x + 8.0, h_center_y),
+                    egui::pos2(h_base_x + 6.0, h_center_y),
+                    egui::Align2::LEFT_CENTER,
+                    "찜",
+                    egui::FontId::proportional(11.0),
+                    Color32::from_rgb(255, 215, 80),
+                );
+                ui.painter().text(
+                    egui::pos2(h_base_x + 28.0, h_center_y),
                     egui::Align2::LEFT_CENTER,
                     "품목명",
                     egui::FontId::proportional(11.0),
@@ -944,6 +996,7 @@ impl MobiMarketApp {
                 ui.separator();
 
                 let mut item_to_remove: Option<String> = None;
+                let mut item_to_toggle_fav: Option<String> = None;
 
                 let upper_overhead = if self.market_search_results.is_empty() { 155.0 } else { 355.0 };
                 let list_height = (total_height - upper_overhead).max(430.0);
@@ -994,6 +1047,23 @@ impl MobiMarketApp {
                                 let center_y = rect.center().y;
 
                                 let mut del_clicked = false;
+                                let mut fav_clicked = false;
+
+                                // 0. 찜 토글 버튼 (base_x + 2.0 ~ base_x + 24.0)
+                                let is_fav = self.is_favorite(&name);
+                                let fav_rect = egui::Rect::from_min_max(
+                                    egui::pos2(base_x + 2.0, rect.min.y + 2.0),
+                                    egui::pos2(base_x + 24.0, rect.max.y - 2.0),
+                                );
+                                let fav_resp = ui
+                                    .interact(fav_rect, ui.id().with("fav_btn"), egui::Sense::click())
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(if is_fav { "찜 해제" } else { "관심 장비로 찜하기" });
+                                if fav_resp.clicked() {
+                                    fav_clicked = true;
+                                    item_to_toggle_fav = Some(name.clone());
+                                }
+
                                 if is_deletable {
                                     let del_rect = egui::Rect::from_min_max(
                                         egui::pos2(base_x + 558.0, rect.min.y + 3.0),
@@ -1021,7 +1091,7 @@ impl MobiMarketApp {
                                     }
                                 }
 
-                                if !del_clicked && resp.clicked() {
+                                if !del_clicked && !fav_clicked && resp.clicked() {
                                     self.selected_item = name.clone();
                                 }
 
@@ -1035,6 +1105,20 @@ impl MobiMarketApp {
                                 };
                                 ui.painter().rect_filled(rect, 4.0, bg_color);
 
+                                // 찜 아이콘 페인팅 (골드 별 or 어두운 별)
+                                let (fav_icon, fav_color) = if is_fav {
+                                    ("★", Color32::from_rgb(255, 215, 0))
+                                } else {
+                                    ("☆", Color32::from_rgb(110, 120, 135))
+                                };
+                                ui.painter().text(
+                                    fav_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    fav_icon,
+                                    egui::FontId::proportional(13.0),
+                                    fav_color,
+                                );
+
                                 // 컬럼 1: 좌측 품목명 텍스트 페인팅 (여유 너비 ~350px로 20자 이상 긴 이름도 가격과 겹치지 않음)
                                 let text_color = if is_selected {
                                     Color32::WHITE
@@ -1042,7 +1126,7 @@ impl MobiMarketApp {
                                     Color32::from_rgb(210, 220, 230)
                                 };
                                 ui.painter().text(
-                                    egui::pos2(base_x + 8.0, center_y),
+                                    egui::pos2(base_x + 28.0, center_y),
                                     egui::Align2::LEFT_CENTER,
                                     &name,
                                     egui::FontId::proportional(12.0),
@@ -1086,6 +1170,9 @@ impl MobiMarketApp {
 
                 if let Some(del_name) = item_to_remove {
                     self.remove_item_from_monitored(&del_name);
+                }
+                if let Some(fav_item) = item_to_toggle_fav {
+                    self.toggle_favorite(&fav_item);
                 }
             });
 
@@ -1798,14 +1885,14 @@ impl MobiMarketApp {
         }
     }
 
-    /// [분석] 시세 추세 & 예약구매 권장가 분석 대시보드 뷰 렌더링
+    /// [플래너] 내 관심 장비 찜 & 스펙업 총 견적 대시보드 뷰 렌더링
     fn view_timing_analysis(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
-            .id_salt("reserve_buy_analysis_scroll")
+            .id_salt("specup_planner_scroll")
             .show(ui, |ui| {
                 ui.add_space(8.0);
 
-                // 1. 상단 타이틀 배너 (마비노기 모바일 귀속 및 예약구매 특화)
+                // 1. 상단 타이틀 배너 (실전 스펙업 플래너 특화)
                 egui::Frame::none()
                     .fill(Color32::from_rgb(22, 27, 34))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
@@ -1813,16 +1900,16 @@ impl MobiMarketApp {
                     .inner_margin(12.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("🎯").size(24.0));
+                            ui.label(RichText::new("⭐").size(24.0));
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("마비노기 모바일 거래소 시세 추세 & 예약구매 권장가 가이드")
+                                    RichText::new("마비노기 모바일 내 관심 장비 찜 & 스펙업 총 견적 플래너")
                                         .size(16.0)
                                         .strong()
-                                        .color(Color32::from_rgb(250, 200, 60)),
+                                        .color(Color32::from_rgb(255, 215, 80)),
                                 );
                                 ui.label(
-                                    RichText::new("한 번 구매한 아이템은 재판매할 수 없는 게임 시스템에 맞추어, 가격 상승/하향 추세를 진단하고 현재 최저가보다 저렴하게 자동 체결되는 최적의 예약구매 권장가를 분석합니다.")
+                                    RichText::new("내가 찜해둔 무기, 방어구, 장신구의 실시간 최저가와 7일 가격 범위를 추적하고, 목표 풀세트를 맞추는 데 필요한 총비용(데카) 견적을 실시간으로 산출합니다.")
                                         .size(12.0)
                                         .color(Color32::from_rgb(180, 190, 205)),
                                 );
@@ -1832,270 +1919,258 @@ impl MobiMarketApp {
 
                 ui.add_space(10.0);
 
-                // 2. 그룹 선택 필터 바 & 추천 액션 퀵 필터 칩
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("품목 그룹:").strong().color(Color32::LIGHT_GRAY));
-                    let groups = [
-                        ItemGroup::All,
-                        ItemGroup::HighValue,
-                        ItemGroup::MagicStones,
-                        ItemGroup::SoulStones,
-                        ItemGroup::Boxes,
-                        ItemGroup::Bags,
-                        ItemGroup::Remnant,
-                        ItemGroup::Abyss,
-                    ];
-                    for g in groups {
-                        let selected = self.timing_selected_group == g;
-                        let text = RichText::new(g.label()).color(if selected {
-                            Color32::from_rgb(255, 215, 0)
-                        } else {
-                            Color32::GRAY
-                        });
-                        if ui.selectable_label(selected, text).clicked() {
-                            self.timing_selected_group = g;
-                        }
-                    }
+                let fav_items = self.get_group_items(ItemGroup::Favorites);
 
-                    ui.separator();
-
-                    ui.label(RichText::new("액션 필터:").strong().color(Color32::LIGHT_GRAY));
-                    let action_chips = ["전체", "🔥 즉시구매만", "🎯 예약구매만", "⚠️ 신중/주의만"];
-                    for chip in action_chips {
-                        let selected = self.timing_action_filter == chip;
-                        let text = RichText::new(chip).color(if selected {
-                            Color32::from_rgb(120, 220, 255)
-                        } else {
-                            Color32::GRAY
-                        });
-                        if ui.selectable_label(selected, text).clicked() {
-                            self.timing_action_filter = chip.to_string();
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-
-                // 대상 품목 수집 및 통계 분석 (Rust 네이티브)
-                let target_names = self.get_group_items(self.timing_selected_group);
-
-                struct ItemAdvice {
-                    name: String,
-                    cur_price: i64,
-                    trend_text: &'static str,
-                    trend_color: Color32,
-                    min_7d: i64,
-                    max_7d: i64,
-                    reserve_price: i64,
-                    saving_amount: i64,
-                    saving_ratio: f64,
-                    golden_hour: u32,
-                    priority: u32, // 4: 즉시구매, 3: 예약구매, 2: 대기, 1: 고점주의, 0: 관망
-                    action_label: &'static str,
-                    action_color: Color32,
-                    action_desc: &'static str,
-                }
-
-                let mut analyzed_items: Vec<ItemAdvice> = Vec::new();
-
-                for name in &target_names {
-                    if let Some(snaps) = self.snapshots_cache.get(name) {
-                        if snaps.len() >= 3 {
-                            let prices: Vec<f64> = snaps.iter().map(|s| s.min_unit_price as f64).collect();
-                            let cur_price = *prices.last().unwrap_or(&0.0) as i64;
-                            let min_7d = prices.iter().cloned().fold(f64::INFINITY, f64::min) as i64;
-                            let max_7d = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max) as i64;
-
-                            // 단기(5회) vs 중기(20회) 이동평균
-                            let w_short = if snaps.len() >= 5 { 5 } else { snaps.len() };
-                            let w_mid = if snaps.len() >= 20 { 20 } else { snaps.len() };
-                            let sma_short = prices[prices.len() - w_short..].iter().sum::<f64>() / w_short as f64;
-                            let sma_mid = prices[prices.len() - w_mid..].iter().sum::<f64>() / w_mid as f64;
-
-                            let variance = prices[prices.len() - w_mid..].iter().map(|p| (p - sma_mid).powi(2)).sum::<f64>() / w_mid as f64;
-                            let std_dev = variance.sqrt();
-                            let _bb_lower = (sma_mid - (std_dev * 2.0)).max(1.0);
-                            let bb_upper = sma_mid + (std_dev * 2.0);
-
-                            // 추세 진단 (단기 vs 중기 차이 비율)
-                            let trend_diff = if sma_mid > 0.0 {
-                                (sma_short - sma_mid) / sma_mid * 100.0
-                            } else {
-                                0.0
-                            };
-
-                            let (trend_text, trend_color) = if trend_diff > 1.2 {
-                                ("📈 상승 추세", Color32::from_rgb(255, 120, 120))
-                            } else if trend_diff < -1.2 {
-                                ("📉 하향 추세", Color32::from_rgb(100, 200, 255))
-                            } else {
-                                ("➡️ 횡보/보합", Color32::LIGHT_GRAY)
-                            };
-
-                            // 마비노기 모바일 예약구매 추천가 산출 (경매 최고가 우선 체결 룰 반영)
-                            // 원칙: 7일 최저가(min_7d)보다 낮으면 경쟁자에게 밀려 미체결되므로 항상 min_7d 이상이어야 함.
-                            let (reserve_price, saving_amount, saving_ratio) = if cur_price <= min_7d {
-                                // 현재가가 이미 7일 최저점 이하인 경우: 예약구매 불필요 (즉시 매수 타깃)
-                                (cur_price, 0, 0.0)
-                            } else {
-                                // 경쟁 우위 호가: 현재가의 약 96% 호가(경쟁자 제압)로 산출하되, min_7d 이상 보장
-                                let raw_target = ((cur_price as f64 * 0.96).round() as i64).max(min_7d);
-                                let final_reserve = raw_target.min(cur_price - 1).max(1);
-                                let saved = cur_price - final_reserve;
-                                let ratio = (saved as f64 / cur_price as f64) * 100.0;
-                                (final_reserve, saved, ratio)
-                            };
-
-                            // 골든타임 계산 (역사적으로 가장 싼 매물이 자주 등록되는 시간대)
-                            let mut hour_sums: HashMap<u32, (f64, usize)> = HashMap::new();
-                            for s in snaps {
-                                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s.scraped_at, "%Y-%m-%d %H:%M:%S") {
-                                    use chrono::Timelike;
-                                    let entry = hour_sums.entry(dt.hour()).or_insert((0.0, 0));
-                                    entry.0 += s.min_unit_price as f64;
-                                    entry.1 += 1;
-                                }
-                            }
-                            let mut best_buy_hour = 12;
-                            let mut min_h_avg = f64::MAX;
-                            for (h, (sum, count)) in hour_sums {
-                                if count > 0 {
-                                    let avg = sum / count as f64;
-                                    if avg < min_h_avg {
-                                        min_h_avg = avg;
-                                        best_buy_hour = h;
+                // 찜한 품목이 없는 경우 (Empty State 안내 박스)
+                if fav_items.is_empty() {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(20, 24, 32))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(50, 60, 75)))
+                        .rounding(8.0)
+                        .inner_margin(24.0)
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(RichText::new("⭐").size(40.0));
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new("아직 찜한 장비나 아이템이 없습니다!")
+                                        .size(18.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(255, 215, 80)),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("1번째 [시세] 탭이나 [내 직업 장비] 목록에서 내가 맞추고 싶은 무기, 방어구, 장신구 옆의 '☆' 버튼을 눌러보세요.")
+                                        .size(13.0)
+                                        .color(Color32::LIGHT_GRAY),
+                                );
+                                ui.label(
+                                    RichText::new("찜한 장비들의 풀세트 스펙업 총 견적과 최저가 바닥권 도달 여부를 한눈에 계산해 드립니다.")
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(160, 180, 205)),
+                                );
+                                ui.add_space(14.0);
+                                if ui.button(RichText::new("  👉 [시세] 탭으로 이동하여 내 직업 장비 둘러보기  ").size(14.0).strong().color(Color32::WHITE)).clicked() {
+                                    self.active_tab = MainTab::MarketPrices;
+                                    self.selected_group = ItemGroup::MyJob;
+                                    let items = self.get_group_items(ItemGroup::MyJob);
+                                    if let Some(first) = items.first() {
+                                        self.selected_item = first.clone();
                                     }
                                 }
-                            }
-
-                            // 추천 행동 포지션 및 경중도 매핑 (게임 귀속/경매 메커니즘 특화)
-                            let (priority, action_label, action_color, action_desc) = if cur_price <= min_7d || (cur_price <= (min_7d as f64 * 1.01) as i64 && trend_diff > -0.5) {
-                                (4, "🔥 지금 즉시 구매 권장", Color32::from_rgb(255, 90, 90), "바닥권 도달/상승 전환! 지금 즉시 구매 적기")
-                            } else if cur_price >= (max_7d as f64 * 0.98) as i64 || cur_price as f64 >= bb_upper {
-                                (1, "🛑 고점 매수 주의 (호구 방지)", Color32::from_rgb(255, 140, 50), "단기 최고점 과열 상태, 지금 사면 손해!")
-                            } else if trend_diff < -1.2 {
-                                // 승운 피드백: 가격이 쭉 빠지고 있을 때는 예약구매를 신중히 하고 관망
-                                (2, "⚠️ 예약구매 신중 (하락 진행)", Color32::from_rgb(100, 210, 255), "하향 추세 진행 중! 예약구매 신중, 바닥 확인 대기")
-                            } else if cur_price > min_7d && saving_ratio >= 1.0 {
-                                // 보합세 또는 상승세: 매물이 마르거나 오르기 전 경쟁 우위 예약구매가로 선점
-                                (3, "🎯 예약구매 적극 권장", Color32::from_rgb(255, 215, 0), "보합/상승세! 경쟁 우위 예약구매가로 선점 추천")
-                            } else {
-                                (0, "⚖️ 시세 안정 (필요 시 매수)", Color32::from_rgb(170, 185, 205), "적정 밴드 내 횡보 중, 필요 시 구매")
-                            };
-
-                            analyzed_items.push(ItemAdvice {
-                                name: name.clone(),
-                                cur_price,
-                                trend_text,
-                                trend_color,
-                                min_7d,
-                                max_7d,
-                                reserve_price,
-                                saving_amount,
-                                saving_ratio,
-                                golden_hour: best_buy_hour,
-                                priority,
-                                action_label,
-                                action_color,
-                                action_desc,
                             });
-                        }
-                    }
+                        });
+                    return;
                 }
 
-                // 3. 사용자 요청: 추천 액션의 경중도(Priority) 내림차순 자동 정렬! (시급한 행동이 맨 위로)
-                analyzed_items.sort_by(|a, b| {
-                    b.priority.cmp(&a.priority)
-                        .then(b.saving_amount.cmp(&a.saving_amount))
-                });
+                // 찜 품목 데이터 모델 및 견적 집계
+                struct FavRow {
+                    name: String,
+                    cur_price: Option<i64>,
+                    min_7d: Option<i64>,
+                    max_7d: Option<i64>,
+                    status_label: &'static str,
+                    status_color: Color32,
+                    diff_min_str: String,
+                    has_recipe: bool,
+                }
 
-                // KPI 집계
-                let count_buy_now = analyzed_items.iter().filter(|i| i.priority == 4).count();
-                let count_reserve = analyzed_items.iter().filter(|i| i.priority == 3).count();
-                let avg_saving_ratio = if !analyzed_items.is_empty() {
-                    analyzed_items.iter().map(|i| i.saving_ratio).sum::<f64>() / analyzed_items.len() as f64
+                let mut rows: Vec<FavRow> = Vec::new();
+                let mut total_current_cost: i64 = 0;
+                let mut total_optimal_cost: i64 = 0;
+                let mut priced_count = 0;
+
+                for name in &fav_items {
+                    let cur_price = self.get_cached_price(name);
+                    let (min_7d, max_7d) = self.get_period_min_max(name);
+
+                    if let Some(p) = cur_price {
+                        total_current_cost += p;
+                        priced_count += 1;
+                    }
+                    if let Some(min_p) = min_7d {
+                        total_optimal_cost += min_p;
+                    } else if let Some(p) = cur_price {
+                        total_optimal_cost += p;
+                    }
+
+                    // 시세 상태 판정 (🟢바닥권 / 🔴최고점 / 🟠적정시세)
+                    let (status_label, status_color) = if let (Some(cur), Some(min), Some(max)) = (cur_price, min_7d, max_7d) {
+                        if cur <= min || cur <= (min as f64 * 1.02) as i64 {
+                            ("🟢 바닥권 도달 (득템 찬스!)", Color32::from_rgb(100, 235, 120))
+                        } else if cur >= (max as f64 * 0.98) as i64 {
+                            ("🔴 최근 최고점 (매수 주의)", Color32::from_rgb(255, 120, 120))
+                        } else {
+                            ("🟠 적정 시세 횡보", Color32::from_rgb(250, 190, 80))
+                        }
+                    } else if cur_price.is_some() {
+                        ("🟠 데이터 수집 중", Color32::from_rgb(200, 200, 200))
+                    } else {
+                        ("⚪ 시세 수집 대기", Color32::GRAY)
+                    };
+
+                    // 7일 최저가 대비 변동폭
+                    let diff_min_str = if let (Some(cur), Some(min)) = (cur_price, min_7d) {
+                        if cur <= min {
+                            "최저가 동결".to_string()
+                        } else {
+                            let diff = cur - min;
+                            let ratio = if min > 0 { (diff as f64 / min as f64) * 100.0 } else { 0.0 };
+                            format!("+{} 데카 (+{:.1}%)", format_number(diff), ratio)
+                        }
+                    } else {
+                        "-".to_string()
+                    };
+
+                    // 레시피 존재 여부 (ZZ 양방향 호환)
+                    let has_recipe = self.all_recipes.iter().any(|r| {
+                        r.display_name == *name
+                            || r.display_name == format!("{}ZZ", name)
+                            || r.display_name == name.trim_end_matches("ZZ")
+                    });
+
+                    rows.push(FavRow {
+                        name: name.clone(),
+                        cur_price,
+                        min_7d,
+                        max_7d,
+                        status_label,
+                        status_color,
+                        diff_min_str,
+                        has_recipe,
+                    });
+                }
+
+                // 2. 상단 3대 스펙업 KPI 카드
+                let total_fav_count = fav_items.len();
+                let saving_potential = (total_current_cost - total_optimal_cost).max(0);
+                let saving_ratio = if total_current_cost > 0 {
+                    (saving_potential as f64 / total_current_cost as f64) * 100.0
                 } else {
                     0.0
                 };
 
-                // 3대 KPI 카드
                 ui.columns(3, |cols| {
                     cols[0].group(|ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(RichText::new("🔥 지금 즉시 구매 권장 (바닥권)").size(12.0).color(Color32::from_rgb(255, 120, 120)));
-                        ui.label(RichText::new(format!("{} 개 품목", count_buy_now)).size(18.0).strong().color(Color32::from_rgb(255, 90, 90)));
-                        ui.label(RichText::new("최근 바닥권 형성 & 상승 반등 조짐 품목").size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("⭐ 찜한 목표 장비 수").size(12.0).color(Color32::from_rgb(255, 215, 80)));
+                        ui.label(RichText::new(format!("{} 개 품목", total_fav_count)).size(18.0).strong().color(Color32::WHITE));
+                        ui.label(RichText::new(format!("* 실시간 시세 반영: {}/{}개 품목", priced_count, total_fav_count)).size(10.0).color(Color32::GRAY));
                     });
                     cols[1].group(|ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(RichText::new("🎯 예약구매 적극 권장 (보합/상승)").size(12.0).color(Color32::from_rgb(255, 200, 80)));
-                        ui.label(RichText::new(format!("{} 개 품목", count_reserve)).size(18.0).strong().color(Color32::from_rgb(255, 215, 0)));
-                        ui.label(RichText::new("보합/상승세 유지 품목, 경쟁 우위 예약구매 선점").size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("💰 풀세트 스펙업 총 견적 (현재 최저가)").size(12.0).color(Color32::from_rgb(250, 180, 40)));
+                        ui.label(RichText::new(format!("{} 데카", format_number(total_current_cost))).size(18.0).strong().color(Color32::from_rgb(250, 190, 80)));
+                        ui.label(RichText::new("현재 마켓 최저가로 풀세트 구매 시 총비용").size(10.0).color(Color32::GRAY));
                     });
                     cols[2].group(|ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(RichText::new("💰 평균 예상 절감률 (예약구매 체결 시)").size(12.0).color(Color32::from_rgb(120, 220, 140)));
-                        ui.label(RichText::new(format!("-{:.1}% 절약", avg_saving_ratio)).size(18.0).strong().color(Color32::from_rgb(100, 235, 120)));
-                        ui.label(RichText::new("최근 7일 최저가 이상 경쟁 우위 호가 기준").size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("🎯 7일 최저가 기준 최적 견적").size(12.0).color(Color32::from_rgb(100, 235, 120)));
+                        ui.label(RichText::new(format!("{} 데카 (-{:.1}%)", format_number(total_optimal_cost), saving_ratio)).size(18.0).strong().color(Color32::from_rgb(100, 235, 120)));
+                        ui.label(RichText::new(format!("바닥권 매수 시 약 {} 데카 절약 가능", format_number(saving_potential))).size(10.0).color(Color32::GRAY));
                     });
                 });
 
                 ui.add_space(10.0);
 
-                // 4. 추세 & 예약구매 권장가 정밀 데이터 테이블 (HTS 7개 컬럼 칼정렬)
+                // 3. 찜한 장비 정밀 데이터 테이블
+                let mut fav_to_toggle: Option<String> = None;
+                let mut recipe_to_jump: Option<String> = None;
+
                 egui::Frame::none()
                     .fill(Color32::from_rgb(20, 24, 32))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 60)))
                     .rounding(8.0)
                     .inner_margin(12.0)
                     .show(ui, |ui| {
-                        egui::Grid::new("reserve_buy_grid")
+                        egui::Grid::new("specup_fav_grid")
                             .striped(true)
-                            .min_col_width(85.0)
+                            .min_col_width(70.0)
                             .spacing([12.0, 7.0])
                             .show(ui, |ui| {
-                                // 테이블 헤더
+                                // 헤더
+                                ui.label(RichText::new("해제").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("품목명").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("현재 최저가").strong().color(Color32::from_rgb(250, 180, 40)));
-                                ui.label(RichText::new("가격 추세").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("최근 7일 가격 범위").strong().color(Color32::LIGHT_GRAY));
-                                ui.label(RichText::new("🎯 예약구매 추천가 (절감률)").strong().color(Color32::from_rgb(100, 235, 120)));
-                                ui.label(RichText::new("골든타임 (최저가)").strong().color(Color32::from_rgb(255, 215, 0)));
-                                ui.label(RichText::new("추천 행동 포지션 (가이드)").strong().color(Color32::WHITE));
+                                ui.label(RichText::new("현재 시세 상태").strong().color(Color32::WHITE));
+                                ui.label(RichText::new("7일 최저가 대비 변동").strong().color(Color32::from_rgb(160, 200, 255)));
+                                ui.label(RichText::new("제작 계산").strong().color(Color32::from_rgb(255, 215, 0)));
                                 ui.end_row();
 
-                                for item in &analyzed_items {
-                                    // 퀵 필터 적용
-                                    if self.timing_action_filter == "🔥 즉시구매만" && item.priority != 4 {
-                                        continue;
-                                    }
-                                    if self.timing_action_filter == "🎯 예약구매만" && item.priority != 3 {
-                                        continue;
-                                    }
-                                    if self.timing_action_filter == "⚠️ 신중/주의만" && item.priority != 2 && item.priority != 1 {
-                                        continue;
+                                for row in &rows {
+                                    // 1. 찜 해제 버튼
+                                    if ui.button(RichText::new("★").color(Color32::from_rgb(255, 215, 0)).size(13.0))
+                                        .on_hover_text("클릭 시 찜 목록에서 해제")
+                                        .clicked()
+                                    {
+                                        fav_to_toggle = Some(row.name.clone());
                                     }
 
-                                    ui.label(RichText::new(&item.name).strong());
-                                    ui.label(RichText::new(format!("{} 데카", format_number(item.cur_price))).color(Color32::from_rgb(250, 180, 40)).strong());
-                                    ui.label(RichText::new(item.trend_text).color(item.trend_color).strong());
-                                    ui.label(RichText::new(format!("{} ~ {}", format_number(item.min_7d), format_number(item.max_7d))).color(Color32::from_rgb(160, 175, 195)));
+                                    // 2. 품목명
+                                    ui.label(RichText::new(&row.name).strong());
 
-                                    // 예약구매 추천가 & 절감률
-                                    let reserve_text = format!("{} 데카 (-{:.1}%)", format_number(item.reserve_price), item.saving_ratio);
-                                    ui.label(RichText::new(reserve_text).color(Color32::from_rgb(100, 235, 120)).strong());
+                                    // 3. 현재 최저가
+                                    let cur_str = if let Some(p) = row.cur_price {
+                                        format!("{} 데카", format_number(p))
+                                    } else {
+                                        "시세없음".to_string()
+                                    };
+                                    ui.label(RichText::new(cur_str).color(Color32::from_rgb(250, 180, 40)).strong());
 
-                                    // 골든타임
-                                    ui.label(RichText::new(format!("{:02}시경", item.golden_hour)).color(Color32::from_rgb(255, 215, 0)).strong());
+                                    // 4. 최근 7일 가격 범위
+                                    let range_str = if let (Some(min), Some(max)) = (row.min_7d, row.max_7d) {
+                                        format!("{} ~ {}", format_number(min), format_number(max))
+                                    } else {
+                                        "-".to_string()
+                                    };
+                                    ui.label(RichText::new(range_str).color(Color32::from_rgb(160, 175, 195)));
 
-                                    // 추천 행동 (툴팁에 상세 가이드 설명)
-                                    ui.label(RichText::new(item.action_label).color(item.action_color).strong())
-                                        .on_hover_text(item.action_desc);
+                                    // 5. 시세 상태
+                                    ui.label(RichText::new(row.status_label).color(row.status_color).strong());
+
+                                    // 6. 7일 최저가 대비 변동
+                                    ui.label(RichText::new(&row.diff_min_str).color(Color32::from_rgb(160, 200, 255)));
+
+                                    // 7. 제작 계산기 바로가기
+                                    if row.has_recipe {
+                                        if ui.button(RichText::new("🔨 제작비 비교").size(11.0).strong().color(Color32::WHITE))
+                                            .on_hover_text("2번째 [제작] 탭으로 이동하여 내 인벤토리 재료 차감 실구매액 계산")
+                                            .clicked()
+                                        {
+                                            recipe_to_jump = Some(row.name.clone());
+                                        }
+                                    } else {
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::new(RichText::new("제작 불가").size(10.0).color(Color32::DARK_GRAY)),
+                                        ).on_hover_text("제작 레시피가 없는 드롭/상자 전용 완제품입니다");
+                                    }
 
                                     ui.end_row();
                                 }
                             });
                     });
+
+                // 찜 해제 처리
+                if let Some(target_fav) = fav_to_toggle {
+                    self.toggle_favorite(&target_fav);
+                }
+
+                // 제작비 계산기로 이동 처리
+                if let Some(jump_name) = recipe_to_jump {
+                    let matched_recipe = self.all_recipes.iter().find(|r| {
+                        r.display_name == jump_name
+                            || r.display_name == format!("{}ZZ", jump_name)
+                            || r.display_name == jump_name.trim_end_matches("ZZ")
+                    }).cloned();
+
+                    if let Some(rec) = matched_recipe {
+                        self.selected_recipe = Some(rec);
+                        self.recalculate_cost();
+                        self.active_tab = MainTab::CraftCalculator;
+                    }
+                }
 
                 ui.add_space(16.0);
             });
