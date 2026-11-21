@@ -13,6 +13,10 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// 컴파일 타임에 바이너리 내장되는 웹 시뮬레이터 HTML & 기본 데이터
+const EMBEDDED_WEB_HTML: &str = include_str!("../../web/index.html");
+const EMBEDDED_MARKET_JSON: &str = include_str!("../../web/market_data.json");
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     MarketPrices,
@@ -100,8 +104,6 @@ pub struct MobiMarketApp {
     ai_connector_retry_failed: bool,
 
     // 에코시스템 확장 도구 상태
-    alert_check_status: String,
-    is_checking_alert: bool,
     copied_mcp_config: bool,
 
     // 마지막 갱신 틱 카운터
@@ -151,8 +153,6 @@ impl MobiMarketApp {
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
-            alert_check_status: "대기 중 (아직 검사하지 않음)".to_string(),
-            is_checking_alert: false,
             copied_mcp_config: false,
             last_refresh_tick: std::time::Instant::now(),
         };
@@ -1813,23 +1813,74 @@ impl MobiMarketApp {
         }
     }
 
-    /// 웹 시뮬레이터 브라우저 열기 (정적 데이터 동기화 포함)
+    /// 웹 시뮬레이터 브라우저 열기 (정적 데이터 동기화 및 절대 경로 보장)
     pub fn open_web_simulator() {
-        // 1. 파이썬이 있으면 최신 market_data.json 백그라운드 갱신 시도
+        // 1. 파이썬이 있으면 최신 market_data.json 백그라운드 갱신 시도 (실패 시 무시)
         let _ = std::process::Command::new("python")
             .arg("scripts/export_market_json.py")
             .spawn();
 
-        // 2. Windows 기본 웹 브라우저에서 web/index.html 열기
+        // 2. 대상 HTML 파일의 표준 절대 경로 결정 (내장 HTML 기반 자가 추출 지원)
+        let target_path = Self::resolve_or_extract_web_simulator();
+
+        // 3. Windows 기본 웹 브라우저에서 절대 경로로 안전하게 열기
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("cmd")
-                .args(&["/C", "start", "", "web\\index.html"])
-                .spawn();
+            if let Some(path) = target_path {
+                let path_str = path.to_string_lossy().to_string();
+                let _ = std::process::Command::new("cmd")
+                    .args(&["/C", "start", "", &path_str])
+                    .spawn();
+            }
         }
     }
 
-    /// [도구] 스마트 분석 & 에코시스템 뷰 렌더링
+    /// 웹 시뮬레이터 HTML 파일의 절대 경로를 탐색하거나, 없으면 임시 폴더에 자가 추출
+    fn resolve_or_extract_web_simulator() -> Option<std::path::PathBuf> {
+        // 1순위: 현재 작업 디렉토리 기준 web/index.html
+        if let Ok(cwd) = std::env::current_dir() {
+            let p = cwd.join("web").join("index.html");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // 2순위: 실행 파일 디렉토리 기준 web/index.html 및 프로젝트 상위 경로 탐색
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let p = exe_dir.join("web").join("index.html");
+                if p.exists() {
+                    return Some(p);
+                }
+                // target/release 인접 프로젝트 루트 탐색
+                if let Some(root) = exe_dir.parent().and_then(|p| p.parent()) {
+                    let p = root.join("web").join("index.html");
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+
+        // 3순위: 시스템 임시 폴더(%TEMP%/mobimarket_web)에 내장된 HTML 및 JSON 자가 추출 (Self-extract)
+        let temp_dir = std::env::temp_dir().join("mobimarket_web");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let html_file = temp_dir.join("index.html");
+        let json_file = temp_dir.join("market_data.json");
+
+        let _ = std::fs::write(&html_file, EMBEDDED_WEB_HTML);
+        if !json_file.exists() {
+            let _ = std::fs::write(&json_file, EMBEDDED_MARKET_JSON);
+        }
+
+        if html_file.exists() {
+            Some(html_file)
+        } else {
+            None
+        }
+    }
+
+    /// [도구] 스마트 분석 & 에코시스템 뷰 렌더링 (도구 2 제거 후 3대 핵심 도구 체계로 개편)
     fn view_ecosystem_tools(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("ecosystem_tools_scroll")
@@ -1847,13 +1898,13 @@ impl MobiMarketApp {
                             ui.label(RichText::new("🚀").size(24.0));
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("MobiMarket 스마트 분석 & 4대 에코시스템 확장 센터")
+                                    RichText::new("MobiMarket 3대 핵심 도구 & 에코시스템 확장 센터")
                                         .size(16.0)
                                         .strong()
                                         .color(Color32::from_rgb(250, 200, 60)),
                                 );
                                 ui.label(
-                                    RichText::new("SQLite 시세 스토리지와 연동되는 웹 시뮬레이터, 스마트 3중 알림, 시계열 골든타임 지표, Antigravity AI 도구가 통합 탑재되어 있습니다.")
+                                    RichText::new("SQLite 시세 스토리지와 연동되는 인터랙티브 웹 시뮬레이터, 초고속 시계열 골든타임 지표, Antigravity AI 도구가 통합 탑재되어 있습니다.")
                                         .size(12.0)
                                         .color(Color32::from_rgb(180, 190, 205)),
                                 );
@@ -1863,77 +1914,52 @@ impl MobiMarketApp {
 
                 ui.add_space(12.0);
 
-                // 2열 그리드 레이아웃 (도구 1 & 도구 2)
-                ui.columns(2, |cols| {
-                    // [도구 1: 인터랙티브 웹 시뮬레이터]
-                    cols[0].group(|ui| {
-                        ui.set_min_height(230.0);
+                // [도구 1: 인터랙티브 웹 시뮬레이터] (시원한 풀 위드 카드)
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 24, 32))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 50, 65)))
+                    .rounding(8.0)
+                    .inner_margin(14.0)
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("🌐 도구 1. 인터랙티브 웹 시뮬레이터").size(14.0).strong().color(Color32::from_rgb(100, 210, 255)));
-                            ui.label(RichText::new("(generative_ui)").size(10.0).color(Color32::GRAY));
+                            ui.label(RichText::new("🌐 도구 1. 인터랙티브 웹 시뮬레이터").size(15.0).strong().color(Color32::from_rgb(100, 210, 255)));
+                            ui.label(RichText::new("(generative_ui)").size(11.0).color(Color32::GRAY));
                         });
                         ui.add_space(6.0);
-                        ui.label(RichText::new("Chart.js 기반 시계열 차트와 성공률/대성공/거래소 수수료(10%) What-if 손익을 실시간 계산하는 반응형 웹 대시보드입니다.").size(12.0).color(Color32::from_rgb(200, 210, 220)));
-                        ui.add_space(8.0);
-
-                        if ui.button(RichText::new("🌐 브라우저에서 웹 시뮬레이터 열기").size(13.0).strong().color(Color32::WHITE)).clicked() {
-                            Self::open_web_simulator();
-                        }
-
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("• 대상 파일: web/index.html (오프라인 브라우저 단독 구동 지원)\n• 실시간 데이터 연동: scripts/export_market_json.py").size(11.0).color(Color32::from_rgb(140, 150, 165)));
-                    });
-
-                    // [도구 2: 스마트 시세 감시 & 3중 알림 스케줄러]
-                    cols[1].group(|ui| {
-                        ui.set_min_height(230.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("🔔 도구 2. 스마트 3중 알림 스케줄러").size(14.0).strong().color(Color32::from_rgb(255, 170, 80)));
-                            ui.label(RichText::new("(automation)").size(10.0).color(Color32::GRAY));
-                        });
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("목표가 도달 시 전역 규칙에 따라 디스코드 + Home Assistant 홈미니(50% 볼륨) + Todoist로 3대 채널에 동시 통지합니다 (30분 쿨다운 탑재).").size(12.0).color(Color32::from_rgb(200, 210, 220)));
-                        ui.add_space(8.0);
+                        ui.label(RichText::new("Chart.js 기반 시계열 차트와 성공률/대성공/거래소 수수료(10%) What-if 손익을 실시간 계산하는 반응형 웹 대시보드입니다. 프로그램 내부 HTML 내장 기술을 통해 단일 exe 파일만으로도 언제 어디서나 브라우저에서 즉시 실행됩니다.").size(12.0).color(Color32::from_rgb(200, 210, 220)));
+                        ui.add_space(10.0);
 
                         ui.horizontal(|ui| {
-                            if ui.button(RichText::new("🔔 3중 알림 즉시 검사 실행").size(13.0).strong().color(Color32::WHITE)).clicked() {
-                                self.is_checking_alert = true;
-                                let _ = std::process::Command::new("python")
-                                    .args(&["scripts/price_monitor.py", "--dry-run"])
-                                    .spawn();
-                                self.alert_check_status = "✅ 3중 알림 검사 요청 완료! (콘솔 및 각 채널 확인)".to_string();
+                            if ui.button(RichText::new("🌐 브라우저에서 웹 시뮬레이터 열기").size(14.0).strong().color(Color32::WHITE)).clicked() {
+                                Self::open_web_simulator();
                             }
-                            ui.label(RichText::new(&self.alert_check_status).size(11.0).color(Color32::from_rgb(120, 230, 140)));
+                            ui.label(RichText::new("• 클릭 즉시 기본 웹 브라우저에서 Chart.js 다크 테마 시뮬레이터가 기동됩니다.").size(11.0).color(Color32::from_rgb(140, 160, 185)));
                         });
-
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("• 활성 감시 룰: 용비늘(<=32만), 허상(<=105), 포식(<=115), 심해(<=270)\n• 규칙 설정 파일: config/alert_rules.json").size(11.0).color(Color32::from_rgb(140, 150, 165)));
                     });
-                });
 
                 ui.add_space(14.0);
 
-                // [도구 3: 실시간 시계열 통계 & 골든타임 분석 (Rust 네이티브)]
+                // [도구 2: 실시간 시계열 통계 & 골든타임 분석 (Rust 네이티브)]
                 egui::Frame::none()
                     .fill(Color32::from_rgb(20, 24, 32))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 60)))
                     .rounding(8.0)
-                    .inner_margin(12.0)
+                    .inner_margin(14.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("📈 도구 3. 실시간 시계열 지표 & 최적 매수 타이밍 분석").size(14.0).strong().color(Color32::from_rgb(130, 230, 150)));
-                            ui.label(RichText::new("(ml-best-practices / Rust 네이티브 계산)").size(10.0).color(Color32::GRAY));
+                            ui.label(RichText::new("📈 도구 2. 실시간 시계열 지표 & 최적 매수 타이밍 분석").size(15.0).strong().color(Color32::from_rgb(130, 230, 150)));
+                            ui.label(RichText::new("(ml-best-practices / Rust 네이티브 초고속 계산)").size(11.0).color(Color32::GRAY));
                         });
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("SQLite에 적재된 스냅샷 데이터를 Rust 네이티브로 0.01초 만에 분석하여 볼린저 밴드(20, 2σ)와 시간대별 최저가 골든타임을 도출합니다.").size(12.0).color(Color32::from_rgb(180, 190, 205)));
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("SQLite에 적재된 스냅샷 데이터를 파이썬 없이 Rust 네이티브로 0.01초 만에 분석하여 볼린저 밴드(20, 2σ)와 시간대별 최저가 골든타임을 도출합니다.").size(12.0).color(Color32::from_rgb(180, 190, 205)));
+                        ui.add_space(10.0);
 
                         // 통계 테이블
                         let key_items = ["마력 깃든 용비늘", "허상의 마력석", "포식의 마력석", "심해의 마력석", "공명의 영혼석"];
                         egui::Grid::new("stats_grid")
                             .striped(true)
                             .min_col_width(90.0)
-                            .spacing([12.0, 6.0])
+                            .spacing([12.0, 7.0])
                             .show(ui, |ui| {
                                 ui.label(RichText::new("품목명").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("현재가").strong().color(Color32::from_rgb(250, 180, 40)));
@@ -2010,20 +2036,20 @@ impl MobiMarketApp {
 
                 ui.add_space(14.0);
 
-                // [도구 4: Antigravity AI MCP 도구 서버]
+                // [도구 3: Antigravity AI MCP 도구 서버]
                 egui::Frame::none()
                     .fill(Color32::from_rgb(22, 27, 34))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
                     .rounding(8.0)
-                    .inner_margin(12.0)
+                    .inner_margin(14.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("🤖 도구 4. Antigravity AI 에이전트 전용 MCP 서버").size(14.0).strong().color(Color32::from_rgb(210, 140, 255)));
-                            ui.label(RichText::new("(mcp-app-development / plugins/mobimarket)").size(10.0).color(Color32::GRAY));
+                            ui.label(RichText::new("🤖 도구 3. Antigravity AI 에이전트 전용 MCP 서버").size(15.0).strong().color(Color32::from_rgb(210, 140, 255)));
+                            ui.label(RichText::new("(mcp-app-development / plugins/mobimarket)").size(11.0).color(Color32::GRAY));
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         ui.label(RichText::new("Antigravity 에이전트와 대화하면서 언제든 마비노기 거래소 실시간 시세와 제작 마진을 직접 질의할 수 있습니다.").size(12.0).color(Color32::from_rgb(180, 190, 205)));
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
 
                         let mcp_config = r#"{
   "mcpServers": {
