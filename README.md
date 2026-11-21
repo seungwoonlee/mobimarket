@@ -8,14 +8,14 @@
 
 <br/>
 
-[![최신 버전](https://img.shields.io/badge/Release-v1.0.6_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.6)
-[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.6/mobi_market.exe)
+[![최신 버전](https://img.shields.io/badge/Release-v1.0.7_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.7)
+[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.7/mobi_market.exe)
 [![초고속 엔진](https://img.shields.io/badge/Engine-Rust_초고속_가벼움-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![라이선스](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 <br/>
 
-<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.6/mobi_market.exe">
+<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.7/mobi_market.exe">
   <img src="https://img.shields.io/badge/👉_지금_바로_최신버전_다운로드_(mobi__market.exe)-%23E0443E?style=for-the-badge&logo=windows&logoColor=white" height="45" alt="다운로드 버튼"/>
 </a>
 
@@ -50,10 +50,10 @@
       </p>
     </td>
     <td width="33%" align="center" valign="top">
-      <h3>⏰ 3. 자동 수집 비서</h3>
-      <p><b>"커피 마시고 오면 기록 끝!"</b></p>
+      <h3>📊 3. 매입/매출 타이밍 예측</h3>
+      <p><b>"언제 사고, 언제 팔아야 돈을 벌까?"</b></p>
       <p align="left">
-        10분마다 거래소를 혼자 둘러보고 <b>한국 현재 시간(KST)</b>으로 수첩에 적어둬요. 언제 가격이 뚝 떨어졌는지 타임머신 타듯 확인할 수 있어요!
+        누적 스냅샷을 Rust 네이티브(0.01초)로 분석해 <b>볼린저 밴드 지지선/저항선, 24시간 매입/매출 골든타임, 거래소 10% 수수료 차감 후 실질 순마진</b>을 실시간 예측해 줘요!
       </p>
     </td>
   </tr>
@@ -155,22 +155,12 @@ cargo build --release
 ```
 
 ### 아키텍처 및 기술 스택
-- **언어**: Rust 2021 Edition
+- **언어**: Rust 2021 Edition (Zero-Dependency 단일 실행 바이너리)
 - **UI 라이브러리**: `eframe` / `egui` (하드웨어 가속 즉시 모드 GUI)
 - **차트**: `egui_plot`
 - **로컬 스토리지**: `rusqlite` (SQLite3 WAL 모드, 자동 멱등성 마이그레이션 탑재)
 - **프로세스 통신**: Windows 로컬 파이프 인터페이스
-
-### 🚀 파워 유저를 위한 4대 에코시스템 확장 도구
-MobiMarket의 고속 SQLite 데이터베이스를 레버리지하는 파워 유저용 도구가 함께 포함되어 있습니다:
-1. **인터랙티브 웹 시뮬레이터 (`web/index.html`)**:
-   - `python scripts/export_market_json.py` 실행 후 `web/index.html`을 브라우저에서 열면 Chart.js 기반 시세 차트와 슬라이더 기반 제작 손익/ROI 시뮬레이터를 이용할 수 있습니다.
-2. **스마트 시세 감시 & 3중 알림 스케줄러 (`scripts/price_monitor.py`)**:
-   - 목표가(상/하한선) 도달 시 디스코드 웹훅 + Home Assistant 홈미니(50% 볼륨) + Todoist로 동시 자동 알림 발송 (`python scripts/price_monitor.py`).
-3. **시계열 & 최적 매수 타이밍 분석 (`scripts/analyze_trends.py` & `notebooks/market_trend_analysis.ipynb`)**:
-   - 볼린저 밴드(20, 2σ)와 시간대별 시세 분석을 통해 최저가 집중 시간대(골든 타임) 및 분할 매수 타이밍 도출.
-4. **Antigravity AI MCP 도구 서버 (`plugins/mobimarket/`)**:
-   - 에이전트가 마비노기 거래소 실시간 시세 조회 및 제작 마진을 즉시 계산할 수 있는 공식 MCP 플러그인.
+- **금융공학 엔진**: Rust 네이티브 볼린저 밴드(20, 2σ), 24시간 일중 수급 주기, 수수료 10% 차감 순마진 산출
 </details>
 
 <br/>

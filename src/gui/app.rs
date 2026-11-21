@@ -13,15 +13,11 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// 컴파일 타임에 바이너리 내장되는 웹 시뮬레이터 HTML & 기본 데이터
-const EMBEDDED_WEB_HTML: &str = include_str!("../../web/index.html");
-const EMBEDDED_MARKET_JSON: &str = include_str!("../../web/market_data.json");
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     MarketPrices,
     CraftCalculator,
-    EcosystemTools,
+    TimingAnalysis,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,8 +99,8 @@ pub struct MobiMarketApp {
     has_shown_ai_connector_popup: bool,
     ai_connector_retry_failed: bool,
 
-    // 에코시스템 확장 도구 상태
-    copied_mcp_config: bool,
+    // [시계열 매입/매출 타이밍 예측 탭 상태]
+    timing_selected_group: ItemGroup,
 
     // 마지막 갱신 틱 카운터
     last_refresh_tick: std::time::Instant,
@@ -153,7 +149,7 @@ impl MobiMarketApp {
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
-            copied_mcp_config: false,
+            timing_selected_group: ItemGroup::All,
             last_refresh_tick: std::time::Instant::now(),
         };
 
@@ -563,19 +559,6 @@ impl eframe::App for MobiMarketApp {
                         }
                     }
 
-                    // 웹 시뮬레이터 원클릭 퀵 버튼
-                    if ui
-                        .button(
-                            RichText::new("🌐 웹 시뮬레이터")
-                                .color(Color32::from_rgb(120, 210, 255))
-                                .strong(),
-                        )
-                        .on_hover_text("브라우저에서 Chart.js 인터랙티브 차트 및 제작 마진 시뮬레이터 열기")
-                        .clicked()
-                    {
-                        Self::open_web_simulator();
-                    }
-
                     ui.separator();
 
                     // 남은 시간 카운트다운 (남은 분/초 명확화)
@@ -648,8 +631,8 @@ impl eframe::App for MobiMarketApp {
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
-                    MainTab::EcosystemTools,
-                    RichText::new("  [도구] 스마트 분석 & 에코시스템  ")
+                    MainTab::TimingAnalysis,
+                    RichText::new("  [분석] 매입/매출 타이밍 예측  ")
                         .size(15.0)
                         .strong()
                         .color(Color32::from_rgb(255, 215, 80)),
@@ -662,7 +645,7 @@ impl eframe::App for MobiMarketApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
             MainTab::MarketPrices => self.view_market_prices(ui),
             MainTab::CraftCalculator => self.view_craft_calculator(ui),
-            MainTab::EcosystemTools => self.view_ecosystem_tools(ui),
+            MainTab::TimingAnalysis => self.view_timing_analysis(ui),
         });
 
         // AI 커넥터 비활성화 안내 팝업 모달
@@ -1813,81 +1796,14 @@ impl MobiMarketApp {
         }
     }
 
-    /// 웹 시뮬레이터 브라우저 열기 (정적 데이터 동기화 및 절대 경로 보장)
-    pub fn open_web_simulator() {
-        // 1. 파이썬이 있으면 최신 market_data.json 백그라운드 갱신 시도 (실패 시 무시)
-        let _ = std::process::Command::new("python")
-            .arg("scripts/export_market_json.py")
-            .spawn();
-
-        // 2. 대상 HTML 파일의 표준 절대 경로 결정 (내장 HTML 기반 자가 추출 지원)
-        let target_path = Self::resolve_or_extract_web_simulator();
-
-        // 3. Windows 기본 웹 브라우저에서 절대 경로로 안전하게 열기
-        #[cfg(windows)]
-        {
-            if let Some(path) = target_path {
-                let path_str = path.to_string_lossy().to_string();
-                let _ = std::process::Command::new("cmd")
-                    .args(&["/C", "start", "", &path_str])
-                    .spawn();
-            }
-        }
-    }
-
-    /// 웹 시뮬레이터 HTML 파일의 절대 경로를 탐색하거나, 없으면 임시 폴더에 자가 추출
-    fn resolve_or_extract_web_simulator() -> Option<std::path::PathBuf> {
-        // 1순위: 현재 작업 디렉토리 기준 web/index.html
-        if let Ok(cwd) = std::env::current_dir() {
-            let p = cwd.join("web").join("index.html");
-            if p.exists() {
-                return Some(p);
-            }
-        }
-
-        // 2순위: 실행 파일 디렉토리 기준 web/index.html 및 프로젝트 상위 경로 탐색
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let p = exe_dir.join("web").join("index.html");
-                if p.exists() {
-                    return Some(p);
-                }
-                // target/release 인접 프로젝트 루트 탐색
-                if let Some(root) = exe_dir.parent().and_then(|p| p.parent()) {
-                    let p = root.join("web").join("index.html");
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-            }
-        }
-
-        // 3순위: 시스템 임시 폴더(%TEMP%/mobimarket_web)에 내장된 HTML 및 JSON 자가 추출 (Self-extract)
-        let temp_dir = std::env::temp_dir().join("mobimarket_web");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let html_file = temp_dir.join("index.html");
-        let json_file = temp_dir.join("market_data.json");
-
-        let _ = std::fs::write(&html_file, EMBEDDED_WEB_HTML);
-        if !json_file.exists() {
-            let _ = std::fs::write(&json_file, EMBEDDED_MARKET_JSON);
-        }
-
-        if html_file.exists() {
-            Some(html_file)
-        } else {
-            None
-        }
-    }
-
-    /// [도구] 스마트 분석 & 에코시스템 뷰 렌더링 (도구 2 제거 후 3대 핵심 도구 체계로 개편)
-    fn view_ecosystem_tools(&mut self, ui: &mut egui::Ui) {
+    /// [분석] 시계열 매입/매출 권장 타이밍 예측 분석 대시보드 뷰 렌더링
+    fn view_timing_analysis(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
-            .id_salt("ecosystem_tools_scroll")
+            .id_salt("timing_analysis_scroll")
             .show(ui, |ui| {
                 ui.add_space(8.0);
 
-                // 상단 헤더 배너
+                // 1. 상단 타이틀 배너
                 egui::Frame::none()
                     .fill(Color32::from_rgb(22, 27, 34))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
@@ -1895,16 +1811,16 @@ impl MobiMarketApp {
                     .inner_margin(12.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("🚀").size(24.0));
+                            ui.label(RichText::new("📊").size(24.0));
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("MobiMarket 3대 핵심 도구 & 에코시스템 확장 센터")
+                                    RichText::new("마비노기 모바일 거래소 시계열 매입/매출 권장 타이밍 예측 대시보드")
                                         .size(16.0)
                                         .strong()
                                         .color(Color32::from_rgb(250, 200, 60)),
                                 );
                                 ui.label(
-                                    RichText::new("SQLite 시세 스토리지와 연동되는 인터랙티브 웹 시뮬레이터, 초고속 시계열 골든타임 지표, Antigravity AI 도구가 통합 탑재되어 있습니다.")
+                                    RichText::new("3,600+개 누적 스냅샷을 Rust 네이티브(0.01초)로 분석하여 볼린저 밴드(20, 2σ) 지지/저항선, 24시간 수급 주기, 거래소 10% 수수료 차감 후 실질 순마진을 실시간 예측합니다.")
                                         .size(12.0)
                                         .color(Color32::from_rgb(180, 190, 205)),
                                 );
@@ -1912,82 +1828,151 @@ impl MobiMarketApp {
                         });
                     });
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
-                // [도구 1: 인터랙티브 웹 시뮬레이터] (시원한 풀 위드 카드)
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(20, 24, 32))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 50, 65)))
-                    .rounding(8.0)
-                    .inner_margin(14.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("🌐 도구 1. 인터랙티브 웹 시뮬레이터").size(15.0).strong().color(Color32::from_rgb(100, 210, 255)));
-                            ui.label(RichText::new("(generative_ui)").size(11.0).color(Color32::GRAY));
+                // 2. 그룹 선택 필터 바
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("품목 그룹:").strong().color(Color32::LIGHT_GRAY));
+                    let groups = [
+                        ItemGroup::All,
+                        ItemGroup::HighValue,
+                        ItemGroup::MagicStones,
+                        ItemGroup::SoulStones,
+                        ItemGroup::Boxes,
+                        ItemGroup::Bags,
+                        ItemGroup::Remnant,
+                        ItemGroup::Abyss,
+                    ];
+                    for g in groups {
+                        let selected = self.timing_selected_group == g;
+                        let text = RichText::new(g.label()).color(if selected {
+                            Color32::from_rgb(255, 215, 0)
+                        } else {
+                            Color32::GRAY
                         });
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("Chart.js 기반 시계열 차트와 성공률/대성공/거래소 수수료(10%) What-if 손익을 실시간 계산하는 반응형 웹 대시보드입니다. 프로그램 내부 HTML 내장 기술을 통해 단일 exe 파일만으로도 언제 어디서나 브라우저에서 즉시 실행됩니다.").size(12.0).color(Color32::from_rgb(200, 210, 220)));
-                        ui.add_space(10.0);
+                        if ui.selectable_label(selected, text).clicked() {
+                            self.timing_selected_group = g;
+                        }
+                    }
+                });
 
-                        ui.horizontal(|ui| {
-                            if ui.button(RichText::new("🌐 브라우저에서 웹 시뮬레이터 열기").size(14.0).strong().color(Color32::WHITE)).clicked() {
-                                Self::open_web_simulator();
+                ui.add_space(8.0);
+
+                // 현재 그룹 품목 리스트 수집
+                let target_names = self.get_group_items(self.timing_selected_group);
+
+                // 사전 집계 (KPI 요약용)
+                let mut buy_rec_count = 0;
+                let mut sell_rec_count = 0;
+                let mut valid_roi_sum = 0.0;
+                let mut valid_roi_count = 0;
+
+                for name in &target_names {
+                    if let Some(snaps) = self.snapshots_cache.get(name) {
+                        if snaps.len() >= 3 {
+                            let prices: Vec<f64> = snaps.iter().map(|s| s.min_unit_price as f64).collect();
+                            let cur = *prices.last().unwrap_or(&0.0) as i64;
+                            let n = prices.len() as f64;
+                            let mean = prices.iter().sum::<f64>() / n;
+                            let window = if snaps.len() >= 20 { 20 } else { snaps.len() };
+                            let recent = &prices[prices.len() - window..];
+                            let sma = recent.iter().sum::<f64>() / window as f64;
+                            let variance = recent.iter().map(|p| (p - sma).powi(2)).sum::<f64>() / window as f64;
+                            let std_dev = variance.sqrt();
+                            let bb_lower = (sma - (std_dev * 2.0)).max(1.0);
+                            let bb_upper = sma + (std_dev * 2.0);
+
+                            let net_margin = (bb_upper * 0.90) - bb_lower;
+                            if bb_lower > 0.0 {
+                                let roi = (net_margin / bb_lower) * 100.0;
+                                if roi > 0.0 {
+                                    valid_roi_sum += roi;
+                                    valid_roi_count += 1;
+                                }
                             }
-                            ui.label(RichText::new("• 클릭 즉시 기본 웹 브라우저에서 Chart.js 다크 테마 시뮬레이터가 기동됩니다.").size(11.0).color(Color32::from_rgb(140, 160, 185)));
-                        });
+
+                            if cur as f64 <= bb_lower || (cur as f64) <= mean * 0.93 {
+                                if net_margin > 0.0 {
+                                    buy_rec_count += 1;
+                                }
+                            } else if cur as f64 >= bb_upper {
+                                sell_rec_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                let avg_roi = if valid_roi_count > 0 {
+                    valid_roi_sum / valid_roi_count as f64
+                } else {
+                    0.0
+                };
+
+                // 3. 3대 핵심 KPI 요약 카드
+                ui.columns(3, |cols| {
+                    cols[0].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("🔥 즉시 매입 권장 품목 (바닥권)").size(12.0).color(Color32::from_rgb(255, 120, 120)));
+                        ui.label(RichText::new(format!("{} 개 품목", buy_rec_count)).size(18.0).strong().color(Color32::from_rgb(255, 90, 90)));
+                        ui.label(RichText::new("볼린저 하단 지지선 도달 & 순이익 기대").size(10.0).color(Color32::GRAY));
                     });
+                    cols[1].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("💰 차익 실현 매출 권장 (고점)").size(12.0).color(Color32::from_rgb(255, 200, 80)));
+                        ui.label(RichText::new(format!("{} 개 품목", sell_rec_count)).size(18.0).strong().color(Color32::from_rgb(255, 215, 0)));
+                        ui.label(RichText::new("볼린저 상단 저항선 도달 품목").size(10.0).color(Color32::GRAY));
+                    });
+                    cols[2].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("📈 평균 예상 차익 수익률 (ROI)").size(12.0).color(Color32::from_rgb(120, 220, 140)));
+                        ui.label(RichText::new(format!("+{:.1}%", avg_roi)).size(18.0).strong().color(Color32::from_rgb(100, 235, 120)));
+                        ui.label(RichText::new("거래소 판매 수수료 10% 공제 후 실질 순이익").size(10.0).color(Color32::GRAY));
+                    });
+                });
 
-                ui.add_space(14.0);
+                ui.add_space(10.0);
 
-                // [도구 2: 실시간 시계열 통계 & 골든타임 분석 (Rust 네이티브)]
+                // 4. 시계열 예측 정밀 데이터 테이블
                 egui::Frame::none()
                     .fill(Color32::from_rgb(20, 24, 32))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 60)))
                     .rounding(8.0)
-                    .inner_margin(14.0)
+                    .inner_margin(12.0)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("📈 도구 2. 실시간 시계열 지표 & 최적 매수 타이밍 분석").size(15.0).strong().color(Color32::from_rgb(130, 230, 150)));
-                            ui.label(RichText::new("(ml-best-practices / Rust 네이티브 초고속 계산)").size(11.0).color(Color32::GRAY));
-                        });
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("SQLite에 적재된 스냅샷 데이터를 파이썬 없이 Rust 네이티브로 0.01초 만에 분석하여 볼린저 밴드(20, 2σ)와 시간대별 최저가 골든타임을 도출합니다.").size(12.0).color(Color32::from_rgb(180, 190, 205)));
-                        ui.add_space(10.0);
-
-                        // 통계 테이블
-                        let key_items = ["마력 깃든 용비늘", "허상의 마력석", "포식의 마력석", "심해의 마력석", "공명의 영혼석"];
-                        egui::Grid::new("stats_grid")
+                        egui::Grid::new("timing_pred_grid")
                             .striped(true)
-                            .min_col_width(90.0)
-                            .spacing([12.0, 7.0])
+                            .min_col_width(75.0)
+                            .spacing([10.0, 7.0])
                             .show(ui, |ui| {
+                                // 테이블 헤더
                                 ui.label(RichText::new("품목명").strong().color(Color32::LIGHT_GRAY));
-                                ui.label(RichText::new("현재가").strong().color(Color32::from_rgb(250, 180, 40)));
-                                ui.label(RichText::new("평균가").strong().color(Color32::LIGHT_GRAY));
-                                ui.label(RichText::new("20회 이동평균(SMA)").strong().color(Color32::LIGHT_GRAY));
-                                ui.label(RichText::new("볼린저 밴드(하단~상단)").strong().color(Color32::from_rgb(140, 190, 255)));
-                                ui.label(RichText::new("골든타임(최저가)").strong().color(Color32::from_rgb(255, 215, 0)));
-                                ui.label(RichText::new("매수 시그널").strong().color(Color32::WHITE));
+                                ui.label(RichText::new("현재 최저가").strong().color(Color32::from_rgb(250, 180, 40)));
+                                ui.label(RichText::new("20회 SMA").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("권장 매입선 (하단)").strong().color(Color32::from_rgb(100, 230, 120)));
+                                ui.label(RichText::new("권장 매출선 (상단)").strong().color(Color32::from_rgb(140, 190, 255)));
+                                ui.label(RichText::new("매입 골든타임").strong().color(Color32::from_rgb(100, 220, 255)));
+                                ui.label(RichText::new("매출 골든타임").strong().color(Color32::from_rgb(255, 200, 100)));
+                                ui.label(RichText::new("예상 순마진 (ROI)").strong().color(Color32::from_rgb(255, 215, 0)));
+                                ui.label(RichText::new("추천 행동 포지션").strong().color(Color32::WHITE));
                                 ui.end_row();
 
-                                for item_name in &key_items {
-                                    if let Some(snaps) = self.snapshots_cache.get(*item_name) {
-                                        if !snaps.is_empty() {
+                                for item_name in &target_names {
+                                    if let Some(snaps) = self.snapshots_cache.get(item_name) {
+                                        if snaps.len() >= 3 {
                                             let prices: Vec<f64> = snaps.iter().map(|s| s.min_unit_price as f64).collect();
                                             let cur = *prices.last().unwrap_or(&0.0) as i64;
                                             let n = prices.len() as f64;
                                             let mean = prices.iter().sum::<f64>() / n;
-                                            
-                                            // 최근 20개 이동평균 및 표준편차
+
                                             let window = if snaps.len() >= 20 { 20 } else { snaps.len() };
                                             let recent = &prices[prices.len() - window..];
                                             let sma = recent.iter().sum::<f64>() / window as f64;
                                             let variance = recent.iter().map(|p| (p - sma).powi(2)).sum::<f64>() / window as f64;
                                             let std_dev = variance.sqrt();
-                                            let bb_lower = (sma - (std_dev * 2.0)).max(0.0) as i64;
+                                            let bb_lower = (sma - (std_dev * 2.0)).max(1.0) as i64;
                                             let bb_upper = (sma + (std_dev * 2.0)) as i64;
 
-                                            // 시간대 골든타임 계산 (가장 저렴했던 시간대)
+                                            // 시간대별 최저/최고가 골든타임 계산 (24시간 주기)
                                             let mut hour_sums: HashMap<u32, (f64, usize)> = HashMap::new();
                                             for s in snaps {
                                                 if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s.scraped_at, "%Y-%m-%d %H:%M:%S") {
@@ -1997,81 +1982,70 @@ impl MobiMarketApp {
                                                     entry.1 += 1;
                                                 }
                                             }
-                                            let mut best_hour = 12;
+
+                                            let mut best_buy_hour = 12;
+                                            let mut best_sell_hour = 18;
                                             let mut min_h_avg = f64::MAX;
+                                            let mut max_h_avg = f64::MIN;
+
                                             for (h, (sum, count)) in hour_sums {
                                                 if count > 0 {
                                                     let avg = sum / count as f64;
                                                     if avg < min_h_avg {
                                                         min_h_avg = avg;
-                                                        best_hour = h;
+                                                        best_buy_hour = h;
+                                                    }
+                                                    if avg > max_h_avg {
+                                                        max_h_avg = avg;
+                                                        best_sell_hour = h;
                                                     }
                                                 }
                                             }
 
-                                            // 시그널 도출
-                                            let (sig_text, sig_color) = if cur <= bb_lower || cur as f64 <= mean * 0.93 {
-                                                ("🔥 강력 매수 (바닥권)", Color32::from_rgb(255, 100, 100))
+                                            // 수수료 10% 제외 실질 기대 마진 및 ROI 계산
+                                            let net_margin = ((bb_upper as f64) * 0.90) - (bb_lower as f64);
+                                            let roi = if bb_lower > 0 {
+                                                (net_margin / (bb_lower as f64)) * 100.0
+                                            } else {
+                                                0.0
+                                            };
+
+                                            // 포지션 시그널 도출 (마진 역전 방어 포함)
+                                            let (sig_text, sig_color) = if cur <= bb_lower || (cur as f64) <= mean * 0.93 {
+                                                if net_margin > 0.0 {
+                                                    ("🔥 강력 매입 권장", Color32::from_rgb(255, 90, 90))
+                                                } else {
+                                                    ("⚖️ 적정 관망 (마진 협소)", Color32::from_rgb(170, 185, 205))
+                                                }
                                             } else if (cur as f64) < mean {
-                                                ("✅ 분할 매수 적기", Color32::from_rgb(100, 230, 120))
+                                                ("✅ 분할 매입 권장", Color32::from_rgb(100, 230, 120))
                                             } else if cur >= bb_upper {
-                                                ("⚠️ 과열 구간 (매도 고려)", Color32::from_rgb(255, 180, 50))
+                                                ("💰 매출(차익실현) 권장", Color32::from_rgb(255, 215, 0))
                                             } else {
                                                 ("⚖️ 적정 관망", Color32::from_rgb(170, 185, 205))
                                             };
 
-                                            ui.label(RichText::new(*item_name).strong());
+                                            ui.label(RichText::new(item_name).strong());
                                             ui.label(RichText::new(format!("{} 데카", format_number(cur))).color(Color32::from_rgb(250, 180, 40)));
-                                            ui.label(RichText::new(format!("{} 데카", format_number(mean as i64))));
                                             ui.label(RichText::new(format!("{} 데카", format_number(sma as i64))));
-                                            ui.label(RichText::new(format!("{} ~ {}", format_number(bb_lower), format_number(bb_upper))).color(Color32::from_rgb(140, 190, 255)));
-                                            ui.label(RichText::new(format!("{:02}시경", best_hour)).color(Color32::from_rgb(255, 215, 0)).strong());
+                                            ui.label(RichText::new(format!("{} 데카 이하", format_number(bb_lower))).color(Color32::from_rgb(100, 230, 120)));
+                                            ui.label(RichText::new(format!("{} 데카 이상", format_number(bb_upper))).color(Color32::from_rgb(140, 190, 255)));
+                                            ui.label(RichText::new(format!("{:02}시경", best_buy_hour)).color(Color32::from_rgb(100, 220, 255)).strong());
+                                            ui.label(RichText::new(format!("{:02}시경", best_sell_hour)).color(Color32::from_rgb(255, 200, 100)).strong());
+
+                                            let margin_color = if net_margin >= 0.0 {
+                                                Color32::from_rgb(120, 230, 140)
+                                            } else {
+                                                Color32::from_rgb(255, 100, 100)
+                                            };
+                                            let margin_str = format!("{:+}", net_margin as i64);
+                                            ui.label(RichText::new(format!("{} 데카 ({:+.1}%)", margin_str, roi)).color(margin_color).strong());
                                             ui.label(RichText::new(sig_text).color(sig_color).strong());
                                             ui.end_row();
                                         }
                                     }
                                 }
                             });
-                    });
-
-                ui.add_space(14.0);
-
-                // [도구 3: Antigravity AI MCP 도구 서버]
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(22, 27, 34))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
-                    .rounding(8.0)
-                    .inner_margin(14.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("🤖 도구 3. Antigravity AI 에이전트 전용 MCP 서버").size(15.0).strong().color(Color32::from_rgb(210, 140, 255)));
-                            ui.label(RichText::new("(mcp-app-development / plugins/mobimarket)").size(11.0).color(Color32::GRAY));
-                        });
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("Antigravity 에이전트와 대화하면서 언제든 마비노기 거래소 실시간 시세와 제작 마진을 직접 질의할 수 있습니다.").size(12.0).color(Color32::from_rgb(180, 190, 205)));
-                        ui.add_space(10.0);
-
-                        let mcp_config = r#"{
-  "mcpServers": {
-    "mobimarket": {
-      "command": "python",
-      "args": ["plugins/mobimarket/server.py"]
-    }
-  }
-}"#;
-
-                        ui.horizontal(|ui| {
-                            if ui.button(RichText::new("📋 MCP 설정 JSON 클립보드 복사").size(12.0).strong().color(Color32::WHITE)).clicked() {
-                                ui.output_mut(|o| o.copied_text = mcp_config.to_string());
-                                self.copied_mcp_config = true;
-                            }
-                            if self.copied_mcp_config {
-                                ui.label(RichText::new("✅ 클립보드에 복사되었습니다!").size(11.0).color(Color32::from_rgb(120, 230, 140)));
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("• 제공 도구: mobi_market_get_price(시세조회), mobi_market_list_monitored(전체요약), mobi_market_calculate_craft(제작마진산출)").size(11.0).color(Color32::from_rgb(140, 150, 165)));
                     });
 
                 ui.add_space(16.0);
