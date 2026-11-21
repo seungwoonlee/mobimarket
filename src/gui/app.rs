@@ -22,6 +22,13 @@ pub enum MainTab {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MaterialSortMode {
+    SecondaryProfit, // 자체 가공 순익순 (기본)
+    PrimaryProfit,   // 직구매 순익순
+    HourlyProfit,    // 시간당 시급순
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ItemGroup {
     Favorites,
     All,
@@ -108,6 +115,8 @@ pub struct MobiMarketApp {
     // [가공 제작재료 데카벌이 계산기 상태]
     material_batch_count: i32,
     custom_material_durations: HashMap<String, u32>,
+    material_sort_mode: MaterialSortMode,
+    selected_material_name: Option<String>,
 
     // 마지막 갱신 틱 카운터
     last_refresh_tick: std::time::Instant,
@@ -156,6 +165,8 @@ impl MobiMarketApp {
             favorites: HashSet::new(),
             material_batch_count: 100,
             custom_material_durations: HashMap::new(),
+            material_sort_mode: MaterialSortMode::SecondaryProfit,
+            selected_material_name: None,
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
@@ -2194,7 +2205,39 @@ impl MobiMarketApp {
 
     /// 탭 4: 가공 제작재료 데카벌이 & 시급 계산기 뷰 렌더링
     fn view_material_profit_calculator(&mut self, ui: &mut egui::Ui) {
-        let results = MaterialProfitCalculator::calculate(&self.latest_prices, &self.custom_material_durations);
+        let mut results = MaterialProfitCalculator::calculate(&self.latest_prices, &self.custom_material_durations);
+
+        // 1. 유저 정렬 모드 반영
+        match self.material_sort_mode {
+            MaterialSortMode::SecondaryProfit => {
+                results.sort_by(|a, b| {
+                    let pb = b.profit_secondary.or(b.profit_primary).unwrap_or(i64::MIN);
+                    let pa = a.profit_secondary.or(a.profit_primary).unwrap_or(i64::MIN);
+                    pb.cmp(&pa)
+                });
+            }
+            MaterialSortMode::PrimaryProfit => {
+                results.sort_by(|a, b| {
+                    let pb = b.profit_primary.unwrap_or(i64::MIN);
+                    let pa = a.profit_primary.unwrap_or(i64::MIN);
+                    pb.cmp(&pa)
+                });
+            }
+            MaterialSortMode::HourlyProfit => {
+                results.sort_by(|a, b| {
+                    let hb = b.hourly_secondary.or(b.hourly_primary).unwrap_or(i64::MIN);
+                    let ha = a.hourly_secondary.or(a.hourly_primary).unwrap_or(i64::MIN);
+                    hb.cmp(&ha)
+                });
+            }
+        }
+
+        // 선택된 품목 기본값 보장 (첫 번째 항목)
+        if self.selected_material_name.is_none() || !results.iter().any(|r| Some(&r.name) == self.selected_material_name.as_ref()) {
+            if let Some(first) = results.first() {
+                self.selected_material_name = Some(first.name.clone());
+            }
+        }
 
         egui::ScrollArea::vertical()
             .id_salt("material_profit_scroll")
@@ -2212,13 +2255,13 @@ impl MobiMarketApp {
                             ui.label(RichText::new("💰").size(24.0));
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("마비노기 모바일 가공 제작재료 데카벌이 & 시급 계산기")
+                                    RichText::new("마비노기 모바일 가공 제작재료 데카벌이 플래너 (2-Track 원가 분석)")
                                         .size(16.0)
                                         .strong()
                                         .color(Color32::from_rgb(120, 230, 140)),
                                 );
                                 ui.label(
-                                    RichText::new("잔영/해연 장비 제작에 대량 소모되는 가공 재료(백금강괴, 특급옷감, 특급가죽 등)를 직접 제작하여 거래소에 판매할 때의 순마진(거래소 수수료 10% 공제)과 시간당 데카벌이(시급)를 실시간 분석합니다.")
+                                    RichText::new("거래소 판매 수수료 10% 자동 공제(실수령 90%) 기준! 1차 재료 직구매(최소 시간) vs 2차 재료 자체 가공(노력 투자)의 순익과 수수료 적자 함정을 분석합니다.")
                                         .size(12.0)
                                         .color(Color32::from_rgb(180, 190, 205)),
                                 );
@@ -2228,10 +2271,29 @@ impl MobiMarketApp {
 
                 ui.add_space(8.0);
 
-                // 2. 상단 안내 및 모드 전환 바
+                // 2. 상단 인터랙티브 컨트롤 바 (정렬 토글 + 생산 수량 슬라이더)
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("💡 거래소 수수료 10% 자동 공제(실수령 90%) 기준 분석").size(12.5).color(Color32::from_rgb(255, 215, 120)));
+                    ui.label(RichText::new("정렬 기준:").strong().color(Color32::LIGHT_GRAY));
+
+                    let sort_options = [
+                        (MaterialSortMode::SecondaryProfit, "👑 [루트 B] 자체 가공 순익순"),
+                        (MaterialSortMode::PrimaryProfit, "⚡ [루트 A] 1차 직구매 순익순"),
+                        (MaterialSortMode::HourlyProfit, "⏱️ 시간당 시급순"),
+                    ];
+                    for (mode, label) in sort_options {
+                        let is_active = self.material_sort_mode == mode;
+                        let text = RichText::new(label).color(if is_active {
+                            Color32::from_rgb(255, 215, 0)
+                        } else {
+                            Color32::GRAY
+                        }).strong();
+                        if ui.selectable_label(is_active, text).clicked() {
+                            self.material_sort_mode = mode;
+                        }
+                    }
+
                     ui.separator();
+
                     ui.label(RichText::new("생산 수량:").strong().color(Color32::LIGHT_GRAY));
                     ui.add(egui::Slider::new(&mut self.material_batch_count, 10..=1000).suffix("개"));
                 });
@@ -2284,6 +2346,8 @@ impl MobiMarketApp {
                 ui.add_space(10.0);
 
                 // 4. 단일 종합 가공 데카벌이 분석 그리드
+                let mut newly_selected = None;
+
                 egui::Frame::none()
                     .fill(Color32::from_rgb(20, 24, 32))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 60)))
@@ -2296,7 +2360,7 @@ impl MobiMarketApp {
                             .spacing([12.0, 7.0])
                             .show(ui, |ui| {
                                 // 헤더
-                                ui.label(RichText::new("품목명").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("품목명 (클릭 상세)").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("산출량").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("거래소 판매가").strong().color(Color32::from_rgb(250, 180, 40)));
                                 ui.label(RichText::new("실수령액 (90%)").strong().color(Color32::from_rgb(180, 230, 160)));
@@ -2307,8 +2371,17 @@ impl MobiMarketApp {
                                 ui.end_row();
 
                                 for row in &results {
-                                    // 1. 품목명
-                                    ui.label(RichText::new(&row.name).strong());
+                                    let is_selected = self.selected_material_name.as_deref() == Some(&row.name);
+
+                                    // 1. 품목명 (클릭 시 선택 토글)
+                                    let name_text = if is_selected {
+                                        RichText::new(format!("▶ {}", row.name)).color(Color32::from_rgb(255, 215, 0)).strong()
+                                    } else {
+                                        RichText::new(&row.name).strong()
+                                    };
+                                    if ui.selectable_label(is_selected, name_text).clicked() {
+                                        newly_selected = Some(row.name.clone());
+                                    }
 
                                     // 2. 산출량
                                     ui.label(RichText::new(format!("{}개", row.produced_per_craft)).color(Color32::GRAY));
@@ -2390,6 +2463,114 @@ impl MobiMarketApp {
                                 }
                             });
                     });
+
+                if let Some(sel) = newly_selected {
+                    self.selected_material_name = Some(sel);
+                }
+
+                ui.add_space(14.0);
+
+                // 5. 하단 원가 상세 분해 & 스마트 가이드 패널 (선택된 품목)
+                if let Some(selected_name) = &self.selected_material_name {
+                    if let Some(sel_row) = results.iter().find(|r| &r.name == selected_name) {
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(24, 28, 36))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(60, 70, 85)))
+                            .rounding(8.0)
+                            .inner_margin(14.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("🔍").size(20.0));
+                                    ui.label(RichText::new(format!("[{}] 1회 생산 원가 상세 분해 & 스마트 추천 가이드", sel_row.name)).size(15.0).strong().color(Color32::from_rgb(255, 215, 100)));
+                                    ui.label(RichText::new(format!("(1회 {}개 산출 | 완제품 판매가: {} 데카 | 실수령: {} 데카)",
+                                        sel_row.produced_per_craft,
+                                        sel_row.market_price.map_or("-".to_string(), format_number),
+                                        sel_row.revenue_net.map_or("-".to_string(), format_number)
+                                    )).size(12.0).color(Color32::GRAY));
+                                });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+
+                                ui.columns(2, |cols| {
+                                    // 좌측: 루트 A (1차 직구매)
+                                    cols[0].group(|ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("⚡ [루트 A] 1차 원재료 직구매 제작").strong().color(Color32::from_rgb(120, 220, 255)));
+                                            ui.label(RichText::new("(최소 시간/간편 제작)").size(11.0).color(Color32::GRAY));
+                                        });
+                                        ui.add_space(4.0);
+
+                                        let p_cost = sel_row.primary_cost.map_or("-".to_string(), format_number);
+                                        let p_net = sel_row.profit_primary.map_or("-".to_string(), |n| format!("{:+}", format_number(n)));
+                                        let p_hourly = sel_row.hourly_primary.map_or("-".to_string(), |h| format!("{:+}", format_number(h)));
+                                        let color = if sel_row.profit_primary.unwrap_or(0) > 0 { Color32::from_rgb(100, 235, 120) } else { Color32::from_rgb(255, 90, 90) };
+
+                                        ui.label(format!("• 투입 원재료: {} x {}개", sel_row.primary_ing_name, sel_row.primary_ing_qty));
+                                        ui.label(format!("• 1차 직구매 총비용: {} 데카", p_cost));
+                                        ui.label(RichText::new(format!("• 1회 순마진: {} 데카", p_net)).strong().color(color));
+                                        ui.label(RichText::new(format!("• 시간당 시급: {} 데카/h (소요시간: {}초)", p_hourly, sel_row.duration_secs)).color(Color32::LIGHT_GRAY));
+                                    });
+
+                                    // 우측: 루트 B (2차 자체 가공)
+                                    cols[1].group(|ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("🔥 [루트 B] 2차 원재료 자체 가공 제작").strong().color(Color32::from_rgb(255, 120, 120)));
+                                            ui.label(RichText::new("(노력/시간 2배 투자)").size(11.0).color(Color32::GRAY));
+                                        });
+                                        ui.add_space(4.0);
+
+                                        if let Some(sec_name) = sel_row.secondary_ing_name {
+                                            let s_cost = sel_row.secondary_cost.map_or("-".to_string(), format_number);
+                                            let s_net = sel_row.profit_secondary.map_or("-".to_string(), |n| format!("{:+}", format_number(n)));
+                                            let s_hourly = sel_row.hourly_secondary.map_or("-".to_string(), |h| format!("{:+}", format_number(h)));
+                                            let s_color = if sel_row.profit_secondary.unwrap_or(0) >= 70 { Color32::from_rgb(255, 215, 0) } else { Color32::from_rgb(100, 235, 120) };
+
+                                            ui.label(format!("• 2차 하위재료: [{}] 자체 가공 단계 거침", sec_name));
+                                            ui.label(format!("• 환산 투입원가: {} 데카", s_cost));
+                                            ui.label(RichText::new(format!("• 2회 연속 순마진: {} 데카", s_net)).strong().color(s_color));
+                                            ui.label(RichText::new(format!("• 시간당 시급: {} 데카/h (소요시간: {}초)", s_hourly, sel_row.duration_secs * 2)).color(Color32::LIGHT_GRAY));
+                                        } else {
+                                            ui.label("• 2차 하위 가공 단계가 없는 단일 단계 가공품입니다.");
+                                            ui.label("• 1차 원재료를 직구매하여 즉시 가공하는 [루트 A]를 이용하십시오.");
+                                            ui.label(RichText::new("• 단일 가공만으로도 안정적인 마진 확보 가능").color(Color32::from_rgb(100, 235, 120)));
+                                        }
+                                    });
+                                });
+
+                                ui.add_space(8.0);
+
+                                // 하단 스마트 인사이트 배너
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(16, 20, 26))
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 55, 70)))
+                                    .rounding(6.0)
+                                    .inner_margin(10.0)
+                                    .show(ui, |ui| {
+                                        if sel_row.is_primary_loss {
+                                            let saved = sel_row.profit_secondary.unwrap_or(0) - sel_row.profit_primary.unwrap_or(0);
+                                            ui.label(RichText::new(format!("⚠️ [직구매 적자 경고]: [{}]은 1차 재료를 거래소에서 바로 사서 제작하면 10% 판매 수수료 때문에 1회당 {} 데카의 손해가 발생합니다! 반드시 2차 재료 [{}]부터 자체 가공하십시오. (1회당 +{} 데카 흑자 반전)",
+                                                sel_row.name,
+                                                sel_row.profit_primary.map_or(0, |n| -n),
+                                                sel_row.secondary_ing_name.unwrap_or("하위재료"),
+                                                saved
+                                            )).color(Color32::from_rgb(255, 100, 100)).strong());
+                                        } else if let (Some(p1), Some(p2)) = (sel_row.profit_primary, sel_row.profit_secondary) {
+                                            let saved = p2 - p1;
+                                            ui.label(RichText::new(format!("💡 [노력 대비 추천]: 2차 재료 [{}]부터 직접 가공하면 1회당 {} 데카가 더 절약되어 순이익이 크게 증가합니다! 시간 여유가 있을 때는 자체 가공을, 빠른 회전이 필요할 때는 직구매를 추천합니다.",
+                                                sel_row.secondary_ing_name.unwrap_or("하위재료"),
+                                                saved
+                                            )).color(Color32::from_rgb(120, 230, 140)).strong());
+                                        } else {
+                                            ui.label(RichText::new("💡 [간편 제작 추천]: 1차 재료를 거래소에서 바로 매입하여 가공해도 안정적인 수익이 보장되는 품목입니다.").color(Color32::from_rgb(100, 215, 255)).strong());
+                                        }
+                                    });
+                            });
+                    }
+                }
 
                 ui.add_space(16.0);
             });
