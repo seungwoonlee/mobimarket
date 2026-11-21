@@ -8,14 +8,14 @@
 
 <br/>
 
-[![최신 버전](https://img.shields.io/badge/Release-v1.0.7_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.7)
-[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.7/mobi_market.exe)
+[![최신 버전](https://img.shields.io/badge/Release-v1.0.8_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.0.8)
+[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.8/mobi_market.exe)
 [![초고속 엔진](https://img.shields.io/badge/Engine-Rust_초고속_가벼움-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![라이선스](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 <br/>
 
-<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.7/mobi_market.exe">
+<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.0.8/mobi_market.exe">
   <img src="https://img.shields.io/badge/👉_지금_바로_최신버전_다운로드_(mobi__market.exe)-%23E0443E?style=for-the-badge&logo=windows&logoColor=white" height="45" alt="다운로드 버튼"/>
 </a>
 
@@ -50,10 +50,10 @@
       </p>
     </td>
     <td width="33%" align="center" valign="top">
-      <h3>📊 3. 매입/매출 타이밍 예측</h3>
-      <p><b>"언제 사고, 언제 팔아야 돈을 벌까?"</b></p>
+      <h3>📊 3. 추세 & 예약구매 조언</h3>
+      <p><b>"지금 살까? 예약구매 걸어둘까?"</b></p>
       <p align="left">
-        누적 스냅샷을 Rust 네이티브(0.01초)로 분석해 <b>볼린저 밴드 지지선/저항선, 24시간 매입/매출 골든타임, 거래소 10% 수수료 차감 후 실질 순마진</b>을 실시간 예측해 줘요!
+        마비노기 모바일의 캐릭터 귀속과 예약구매 시스템에 맞춰 <b>상승/하향 추세 진단, 7일 가격 범위, 최적의 예약구매 추천가 및 절감률</b>을 시급성 순서로 딱 정렬해 줘요!
       </p>
     </td>
   </tr>
