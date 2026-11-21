@@ -75,6 +75,96 @@ pub const DEFAULT_MONITORED_NAMES: &[&str] = &[
     "해연의 비늘 갑옷 상의ZZ",
     "해연의 마블 힐링 완드ZZ",
     "해연의 전투복 상의ZZ",
+    // 핵심 가공 제작 재료 (데카 벌이 완제품)
+    "백금강괴",
+    "특급 옷감",
+    "특급 가죽",
+    "특급 실크",
+    "최고급 목재",
+    "단단한 무쇠괴",
+    "마력 깃든 합금",
+    "질긴 가죽끈",
+    // 가공용 1차 원자재 (시세 자동 추적)
+    "백금괴",
+    "철괴",
+    "석탄",
+    "고급 옷감",
+    "가는 실뭉치",
+    "고급 가죽",
+    "고급 실크",
+    "은 실뭉치",
+    "고급 목재",
+    "나무진액",
+    "굵은 실뭉치",
+];
+
+/// 가공 제작 재료 레시피 정의 구조체
+#[derive(Clone, Debug)]
+pub struct MaterialRecipeDef {
+    pub name: &'static str,
+    pub category: &'static str,
+    pub default_duration_secs: u32,
+    pub produced_per_craft: i64,
+    pub ingredients: &'static [(&'static str, i64)],
+}
+
+pub const MATERIAL_RECIPES: &[MaterialRecipeDef] = &[
+    MaterialRecipeDef {
+        name: "백금강괴",
+        category: "금속 제련",
+        default_duration_secs: 6,
+        produced_per_craft: 1,
+        ingredients: &[("백금괴", 2), ("철괴", 5), ("석탄", 3)],
+    },
+    MaterialRecipeDef {
+        name: "특급 옷감",
+        category: "방직",
+        default_duration_secs: 5,
+        produced_per_craft: 1,
+        ingredients: &[("고급 옷감", 3), ("가는 실뭉치", 5)],
+    },
+    MaterialRecipeDef {
+        name: "특급 가죽",
+        category: "가죽 가공",
+        default_duration_secs: 5,
+        produced_per_craft: 1,
+        ingredients: &[("고급 가죽", 3), ("질긴 가죽끈", 2)],
+    },
+    MaterialRecipeDef {
+        name: "특급 실크",
+        category: "실크 방직",
+        default_duration_secs: 8,
+        produced_per_craft: 1,
+        ingredients: &[("고급 실크", 3), ("은 실뭉치", 4)],
+    },
+    MaterialRecipeDef {
+        name: "최고급 목재",
+        category: "목공",
+        default_duration_secs: 7,
+        produced_per_craft: 1,
+        ingredients: &[("고급 목재", 5), ("나무진액", 2)],
+    },
+    MaterialRecipeDef {
+        name: "단단한 무쇠괴",
+        category: "금속 제련",
+        default_duration_secs: 5,
+        produced_per_craft: 1,
+        ingredients: &[("철괴", 8), ("석탄", 4)],
+    },
+    MaterialRecipeDef {
+        name: "마력 깃든 합금",
+        category: "마법 연금",
+        default_duration_secs: 10,
+        produced_per_craft: 1,
+        ingredients: &[("백금강괴", 2), ("허상의 마력석", 1)],
+    },
+    MaterialRecipeDef {
+        name: "질긴 가죽끈",
+        category: "가죽 가공",
+        default_duration_secs: 4,
+        produced_per_craft: 2,
+        ingredients: &[("고급 가죽", 2), ("굵은 실뭉치", 3)],
+    },
 ];
 
 /// 장비 부위(슬롯) 구분

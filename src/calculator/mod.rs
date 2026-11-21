@@ -1,3 +1,7 @@
+pub mod material_profit;
+#[allow(unused_imports)]
+pub use material_profit::{MaterialProfitCalculator, MaterialProfitRow};
+
 use crate::cli::models::OwnedItem;
 use crate::cli::CraftIngredient;
 use crate::store::Database;

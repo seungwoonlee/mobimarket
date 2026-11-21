@@ -1,10 +1,10 @@
-use crate::calculator::{CraftCalculationResult, CraftCalculator};
+use crate::calculator::{CraftCalculationResult, CraftCalculator, MaterialProfitCalculator};
 use crate::cli::models::{MarketRow, OwnedItem};
 use crate::cli::CliClient;
 use crate::collector::Collector;
 use crate::config::{
     get_equipment_slot, is_job_equipment, EquipmentSlot, APP_VERSION, GROUP_BAGS, GROUP_BOXES, GROUP_HIGH_VALUE,
-    GROUP_MAGIC_STONES, GROUP_SOUL_STONES,
+    GROUP_MAGIC_STONES, GROUP_SOUL_STONES, MATERIAL_RECIPES,
 };
 use crate::store::{Database, RecipeRecord, SnapshotRecord};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -18,6 +18,7 @@ pub enum MainTab {
     MarketPrices,
     CraftCalculator,
     TimingAnalysis,
+    MaterialProfit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -104,6 +105,11 @@ pub struct MobiMarketApp {
     // [찜(즐겨찾기) 캐시]
     favorites: HashSet<String>,
 
+    // [가공 제작재료 데카벌이 계산기 상태]
+    material_batch_count: i32,
+    custom_material_durations: HashMap<String, u32>,
+    material_category_filter: String,
+
     // 마지막 갱신 틱 카운터
     last_refresh_tick: std::time::Instant,
 }
@@ -149,6 +155,9 @@ impl MobiMarketApp {
             cost_calculation: None,
             all_recipes: Vec::new(),
             favorites: HashSet::new(),
+            material_batch_count: 100,
+            custom_material_durations: HashMap::new(),
+            material_category_filter: "전체".to_string(),
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
@@ -683,6 +692,14 @@ impl eframe::App for MobiMarketApp {
                         .strong()
                         .color(Color32::from_rgb(255, 215, 80)),
                 );
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    MainTab::MaterialProfit,
+                    RichText::new("  💰 [데카벌이] 제작재료 데카벌이  ")
+                        .size(15.0)
+                        .strong()
+                        .color(Color32::from_rgb(120, 230, 140)),
+                );
             });
             ui.add_space(4.0);
         });
@@ -692,6 +709,7 @@ impl eframe::App for MobiMarketApp {
             MainTab::MarketPrices => self.view_market_prices(ui),
             MainTab::CraftCalculator => self.view_craft_calculator(ui),
             MainTab::TimingAnalysis => self.view_timing_analysis(ui),
+            MainTab::MaterialProfit => self.view_material_profit_calculator(ui),
         });
 
         // AI 커넥터 비활성화 안내 팝업 모달
@@ -2170,6 +2188,271 @@ impl MobiMarketApp {
                         self.recalculate_cost();
                         self.active_tab = MainTab::CraftCalculator;
                     }
+                }
+
+                ui.add_space(16.0);
+            });
+    }
+
+    /// 탭 4: 가공 제작재료 데카벌이 & 시급 계산기 뷰 렌더링
+    fn view_material_profit_calculator(&mut self, ui: &mut egui::Ui) {
+        let results = MaterialProfitCalculator::calculate(&self.latest_prices, &self.custom_material_durations);
+
+        egui::ScrollArea::vertical()
+            .id_salt("material_profit_scroll")
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+
+                // 1. 상단 타이틀 배너
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(22, 27, 34))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 54, 61)))
+                    .rounding(8.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("💰").size(24.0));
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("마비노기 모바일 가공 제작재료 데카벌이 & 시급 계산기")
+                                        .size(16.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(120, 230, 140)),
+                                );
+                                ui.label(
+                                    RichText::new("잔영/해연 장비 제작에 대량 소모되는 가공 재료(백금강괴, 특급옷감, 특급가죽 등)를 직접 제작하여 거래소에 판매할 때의 순마진(거래소 수수료 10% 공제)과 시간당 데카벌이(시급)를 실시간 분석합니다.")
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(180, 190, 205)),
+                                );
+                            });
+                        });
+                    });
+
+                ui.add_space(10.0);
+
+                // 2. 상단 컨트롤 바 (목표 수량 슬라이더 + 카테고리 필터)
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("생산 수량:").strong().color(Color32::LIGHT_GRAY));
+                    ui.add(egui::Slider::new(&mut self.material_batch_count, 10..=1000).suffix("개"));
+
+                    ui.separator();
+
+                    ui.label(RichText::new("분야:").strong().color(Color32::LIGHT_GRAY));
+                    let categories = ["전체", "금속 제련", "방직", "가죽 가공", "목공", "마법 연금"];
+                    for cat in categories {
+                        let selected = self.material_category_filter == cat;
+                        let text = RichText::new(cat).color(if selected {
+                            Color32::from_rgb(255, 215, 0)
+                        } else {
+                            Color32::GRAY
+                        });
+                        if ui.selectable_label(selected, text).clicked() {
+                            self.material_category_filter = cat.to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // 3. 상단 3대 KPI 카드
+                let top_hourly = results.iter().find(|r| r.hourly_profit.is_some() && r.hourly_profit.unwrap() > 0);
+                let top_margin = results.iter().max_by_key(|r| r.net_profit_per_unit.unwrap_or(i64::MIN));
+
+                let batch_count = self.material_batch_count as i64;
+
+                ui.columns(3, |cols| {
+                    cols[0].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("🔥 시간당 수익 1위 (최고 시급)").size(12.0).color(Color32::from_rgb(255, 120, 120)));
+                        if let Some(top) = top_hourly {
+                            let hourly = top.hourly_profit.unwrap_or(0);
+                            ui.label(RichText::new(format!("{} (+{} 데카/h)", top.name, format_number(hourly))).size(16.0).strong().color(Color32::from_rgb(255, 90, 90)));
+                            ui.label(RichText::new(format!("1회 제작: {}초 | 개당 순익: +{} 데카", top.duration_secs, format_number(top.net_profit_per_unit.unwrap_or(0)))).size(10.0).color(Color32::GRAY));
+                        } else {
+                            ui.label(RichText::new("수익성 품목 분석 중").size(16.0).color(Color32::GRAY));
+                            ui.label(RichText::new("거래소 시세 수집 후 표기").size(10.0).color(Color32::DARK_GRAY));
+                        }
+                    });
+
+                    cols[1].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("💎 개당 최대 마진 1위").size(12.0).color(Color32::from_rgb(120, 220, 255)));
+                        if let Some(top_m) = top_margin {
+                            let unit_net = top_m.net_profit_per_unit.unwrap_or(0);
+                            let margin_r = top_m.margin_ratio.unwrap_or(0.0);
+                            ui.label(RichText::new(format!("{} (+{} 데카)", top_m.name, format_number(unit_net))).size(16.0).strong().color(Color32::from_rgb(100, 215, 255)));
+                            ui.label(RichText::new(format!("원자재 대비 순마진율: +{:.1}%", margin_r)).size(10.0).color(Color32::GRAY));
+                        } else {
+                            ui.label(RichText::new("-").size(16.0).color(Color32::GRAY));
+                            ui.label(RichText::new("시세 수집 대기").size(10.0).color(Color32::DARK_GRAY));
+                        }
+                    });
+
+                    cols[2].group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(format!("⚡ 목표 {}개 일괄 제작 시뮬레이션", batch_count)).size(12.0).color(Color32::from_rgb(255, 215, 80)));
+                        if let Some(top) = top_hourly {
+                            let total_net = top.net_profit_per_unit.unwrap_or(0) * batch_count;
+                            let total_secs = top.duration_secs as i64 * (batch_count / top.produced_per_craft.max(1));
+                            let total_mins = (total_secs as f64 / 60.0).round() as i64;
+                            ui.label(RichText::new(format!("+{} 데카 순이익", format_number(total_net))).size(16.0).strong().color(Color32::from_rgb(255, 215, 80)));
+                            ui.label(RichText::new(format!("1위 [{}] 기준 | 예상 소요시간: 약 {}분", top.name, total_mins)).size(10.0).color(Color32::GRAY));
+                        } else {
+                            ui.label(RichText::new("-").size(16.0).color(Color32::GRAY));
+                            ui.label(RichText::new("시세 수집 대기").size(10.0).color(Color32::DARK_GRAY));
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+
+                // 4. 정밀 데이터 그리드
+                let mut duration_to_update: Option<(String, u32)> = None;
+
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 24, 32))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 60)))
+                    .rounding(8.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("material_profit_grid")
+                            .striped(true)
+                            .min_col_width(65.0)
+                            .spacing([12.0, 7.0])
+                            .show(ui, |ui| {
+                                // 헤더
+                                ui.label(RichText::new("가공 품목명").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("분야").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("완제품 판매가").strong().color(Color32::from_rgb(250, 180, 40)));
+                                ui.label(RichText::new("원자재 총비용").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("개당 순마진 (10% 차감)").strong().color(Color32::from_rgb(100, 235, 120)));
+                                ui.label(RichText::new("마진율").strong().color(Color32::from_rgb(160, 200, 255)));
+                                ui.label(RichText::new("1회 제작시간").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("⚡ 시간당 데카벌이").strong().color(Color32::from_rgb(255, 215, 0)));
+                                ui.label(RichText::new(format!("목표 {}개 순이익", batch_count)).strong().color(Color32::WHITE));
+                                ui.label(RichText::new("수익성 판정").strong().color(Color32::WHITE));
+                                ui.end_row();
+
+                                for row in &results {
+                                    // 카테고리 필터
+                                    if self.material_category_filter != "전체" && row.category != self.material_category_filter {
+                                        continue;
+                                    }
+
+                                    // 1. 품목명
+                                    ui.label(RichText::new(&row.name).strong());
+
+                                    // 2. 분야
+                                    ui.label(RichText::new(&row.category).color(Color32::GRAY));
+
+                                    // 3. 완제품 판매가
+                                    let market_str = if let Some(p) = row.market_price {
+                                        format!("{} 데카", format_number(p))
+                                    } else {
+                                        "시세없음".to_string()
+                                    };
+                                    ui.label(RichText::new(market_str).color(Color32::from_rgb(250, 180, 40)).strong());
+
+                                    // 4. 원자재 총비용 (호버 시 하위 재료 단가 툴팁 표기)
+                                    let (cost_str, cost_tooltip) = if let Some(c) = row.material_cost {
+                                        let mut tip = String::new();
+                                        if let Some(def) = MATERIAL_RECIPES.iter().find(|d| d.name == row.name) {
+                                            for (ing_name, ing_qty) in def.ingredients {
+                                                let p_str = if let Some(ip) = self.latest_prices.get(*ing_name) {
+                                                    format!("{} 데카", format_number(*ip))
+                                                } else {
+                                                    "-".to_string()
+                                                };
+                                                tip.push_str(&format!("• {} x {}개: {}\n", ing_name, ing_qty, p_str));
+                                            }
+                                        }
+                                        (format!("{} 데카", format_number(c)), tip)
+                                    } else {
+                                        ("원자재 시세없음".to_string(), "하위 재료 중 시세 미수집 품목 존재".to_string())
+                                    };
+                                    ui.label(RichText::new(cost_str).color(Color32::from_rgb(180, 190, 205)))
+                                        .on_hover_text(cost_tooltip);
+
+                                    // 5. 개당 순마진
+                                    if let Some(net_u) = row.net_profit_per_unit {
+                                        let net_color = if net_u > 0 {
+                                            Color32::from_rgb(100, 235, 120)
+                                        } else {
+                                            Color32::from_rgb(255, 100, 100)
+                                        };
+                                        ui.label(RichText::new(format!("{:+}", format_number(net_u))).strong().color(net_color));
+                                    } else {
+                                        ui.label("-");
+                                    }
+
+                                    // 6. 마진율
+                                    if let Some(margin) = row.margin_ratio {
+                                        let m_color = if margin > 0.0 {
+                                            Color32::from_rgb(160, 200, 255)
+                                        } else {
+                                            Color32::LIGHT_RED
+                                        };
+                                        ui.label(RichText::new(format!("{:+.1}%", margin)).color(m_color));
+                                    } else {
+                                        ui.label("-");
+                                    }
+
+                                    // 7. 1회 제작시간 (미세 조절 버튼)
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("-").clicked() && row.duration_secs > 1 {
+                                            duration_to_update = Some((row.name.clone(), row.duration_secs - 1));
+                                        }
+                                        ui.label(format!("{}초", row.duration_secs));
+                                        if ui.small_button("+").clicked() && row.duration_secs < 60 {
+                                            duration_to_update = Some((row.name.clone(), row.duration_secs + 1));
+                                        }
+                                    });
+
+                                    // 8. 시간당 데카벌이
+                                    if let Some(hourly) = row.hourly_profit {
+                                        let h_color = if hourly >= 30_000 {
+                                            Color32::from_rgb(255, 215, 0)
+                                        } else if hourly >= 10_000 {
+                                            Color32::from_rgb(100, 235, 120)
+                                        } else if hourly > 0 {
+                                            Color32::from_rgb(160, 200, 255)
+                                        } else {
+                                            Color32::from_rgb(255, 100, 100)
+                                        };
+                                        ui.label(RichText::new(format!("{:+}", format_number(hourly))).size(12.5).strong().color(h_color));
+                                    } else {
+                                        ui.label("-");
+                                    }
+
+                                    // 9. 목표 N개 제작 시 순수익
+                                    if let Some(net_u) = row.net_profit_per_unit {
+                                        let batch_net = net_u * batch_count;
+                                        let batch_secs = row.duration_secs as i64 * (batch_count / row.produced_per_craft.max(1));
+                                        let batch_mins = (batch_secs as f64 / 60.0).round() as i64;
+                                        let b_color = if batch_net > 0 { Color32::WHITE } else { Color32::LIGHT_RED };
+                                        ui.label(RichText::new(format!("{} 데카 (약 {}분)", format_number(batch_net), batch_mins)).color(b_color));
+                                    } else {
+                                        ui.label("-");
+                                    }
+
+                                    // 10. 상태 뱃지
+                                    let badge_color = match row.status_code {
+                                        4 => Color32::from_rgb(255, 215, 0),
+                                        3 => Color32::from_rgb(100, 235, 120),
+                                        2 => Color32::from_rgb(160, 200, 255),
+                                        1 => Color32::from_rgb(255, 100, 100),
+                                        _ => Color32::GRAY,
+                                    };
+                                    ui.label(RichText::new(row.status_label).color(badge_color).strong());
+
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                // 커스텀 소요시간 갱신 처리
+                if let Some((name, new_dur)) = duration_to_update {
+                    self.custom_material_durations.insert(name, new_dur);
                 }
 
                 ui.add_space(16.0);
