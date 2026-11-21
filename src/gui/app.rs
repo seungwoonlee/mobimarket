@@ -279,7 +279,7 @@ impl MobiMarketApp {
         });
     }
 
-    /// 거래소 전체 실시간 검색 실행
+    /// 거래소 전체 실시간 검색 실행 (띄어쓰기 무시 + 로컬 캐시 하이브리드 통합 검색)
     pub fn search_market_online(&mut self) {
         let kw = self.market_search_keyword.trim().to_string();
         if kw.is_empty() {
@@ -290,26 +290,105 @@ impl MobiMarketApp {
         self.search_error_msg = None;
         let cli = self.cli.clone();
 
+        // 1. 공백 제거 정규화 키워드 준비 (띄어쓰기 무시 매칭용)
+        let norm_kw = normalize_search_text(&kw);
+
+        // 2. 로컬 캐시 및 레시피 후보 선(先) 수집 (띄어쓰기 무시 매칭)
+        let mut local_candidates: Vec<String> = Vec::new();
+        // (1) 가공 10대 레시피
+        for def in crate::config::MATERIAL_RECIPES {
+            if normalize_search_text(def.name).contains(&norm_kw) && !local_candidates.contains(&def.name.to_string()) {
+                local_candidates.push(def.name.to_string());
+            }
+        }
+        // (2) 제작 레시피
+        for r in &self.all_recipes {
+            if normalize_search_text(&r.display_name).contains(&norm_kw) && !local_candidates.contains(&r.display_name) {
+                local_candidates.push(r.display_name.clone());
+            }
+        }
+        // (3) 모니터링 목록 및 기본 품목
+        for m in &self.monitored_items {
+            if normalize_search_text(m).contains(&norm_kw) && !local_candidates.contains(m) {
+                local_candidates.push(m.clone());
+            }
+        }
+        for d in crate::config::DEFAULT_MONITORED_NAMES {
+            if normalize_search_text(d).contains(&norm_kw) && !local_candidates.contains(&d.to_string()) {
+                local_candidates.push(d.to_string());
+            }
+        }
+
+        // 3. 온라인 CLI 질의 구성 (원본 키워드 + 공백제거 키워드 + 로컬 매칭 대표품목 최대 5개)
+        let mut query_names = vec![kw.clone()];
+        let no_space_kw = kw.replace(' ', "");
+        if no_space_kw != kw && !no_space_kw.is_empty() {
+            query_names.push(no_space_kw);
+        }
+        for c in local_candidates.iter().take(5) {
+            if !query_names.contains(c) {
+                query_names.push(c.clone());
+            }
+        }
+
+        let mut final_rows: Vec<MarketRow> = Vec::new();
+        let mut seen_names = HashSet::new();
+
+        // 4. 온라인 질의 실행
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                match cli.get_market_prices(&[kw.clone()]).await {
-                    Ok(res) => {
-                        let mut rows = Vec::new();
-                        if let Some(results) = res.results {
-                            for q in results {
-                                for r in q.rows {
-                                    rows.push(r);
+                if let Ok(res) = cli.get_market_prices(&query_names).await {
+                    if let Some(results) = res.results {
+                        for q in results {
+                            for r in q.rows {
+                                if !seen_names.contains(&r.display_name) {
+                                    seen_names.insert(r.display_name.clone());
+                                    final_rows.push(r);
                                 }
                             }
                         }
-                        self.market_search_results = rows;
-                    }
-                    Err(e) => {
-                        self.search_error_msg = Some(format!("검색 실패: {}", e));
                     }
                 }
             });
         });
+
+        // 5. 로컬 매칭 품목 중 온라인 검색 결과에 누락된 항목을 Fallback으로 추가 (오프라인 상태 완벽 지원)
+        for loc_name in local_candidates {
+            if !seen_names.contains(&loc_name) {
+                seen_names.insert(loc_name.clone());
+                let cached_price = self.latest_prices.get(&loc_name).cloned();
+                final_rows.push(MarketRow {
+                    display_name: loc_name.clone(),
+                    rarity: None,
+                    star: None,
+                    season: None,
+                    main_attribute_range: None,
+                    favorite: Some(self.is_favorite(&loc_name)),
+                    in_stock: cached_price.is_some(),
+                    min_unit_price: cached_price,
+                });
+            }
+        }
+
+        // 띄어쓰기 무시 일치도에 따라 정렬 (완전 일치 우선, 그 다음 포함)
+        final_rows.sort_by(|a, b| {
+            let na = normalize_search_text(&a.display_name);
+            let nb = normalize_search_text(&b.display_name);
+            let a_exact = na == norm_kw;
+            let b_exact = nb == norm_kw;
+            if a_exact != b_exact {
+                return b_exact.cmp(&a_exact);
+            }
+            na.cmp(&nb)
+        });
+
+        if final_rows.is_empty() {
+            self.search_error_msg = Some(format!("'{}' 검색 결과가 없습니다. (띄어쓰기 무시)", kw));
+        } else {
+            self.search_error_msg = None;
+        }
+
+        self.market_search_results = final_rows;
         self.is_searching_market = false;
     }
 
@@ -896,9 +975,12 @@ impl MobiMarketApp {
                             .auto_shrink([false, false])
                             .max_height(180.0)
                             .show(ui, |ui| {
-                                let mut item_to_add: Option<String> = None;
+                                let mut item_to_add_monitored: Option<String> = None;
+                                let mut item_to_toggle_fav_from_search: Option<String> = None;
+
                                 for row in &self.market_search_results {
                                     let is_monitored = self.monitored_items.contains(&row.display_name);
+                                    let is_fav = self.is_favorite(&row.display_name);
                                     let price_text = if let Some(p) = row.min_unit_price {
                                         format!("{} 데카", format_number(p))
                                     } else {
@@ -906,31 +988,64 @@ impl MobiMarketApp {
                                     };
 
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(&row.display_name).size(12.0));
+                                        // 1. 좌측 원클릭 찜 토글 아이콘
+                                        let (fav_icon, fav_color) = if is_fav {
+                                            ("★", Color32::from_rgb(255, 215, 0))
+                                        } else {
+                                            ("☆", Color32::from_rgb(120, 130, 145))
+                                        };
+                                        if ui.selectable_label(false, RichText::new(fav_icon).color(fav_color))
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .on_hover_text(if is_fav { "찜 해제" } else { "⭐ 찜 목록에 추가 (자동 모니터링)" })
+                                            .clicked()
+                                        {
+                                            item_to_toggle_fav_from_search = Some(row.display_name.clone());
+                                        }
+
+                                        // 2. 품목명 & 최저가
+                                        ui.label(RichText::new(&row.display_name).size(12.0).strong());
                                         ui.label(
                                             RichText::new(price_text)
                                                 .size(11.0)
                                                 .color(Color32::from_rgb(250, 190, 80)),
                                         );
 
+                                        // 3. 우측 액션 버튼들
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
+                                                // 모니터링 추가/상태 버튼
                                                 if is_monitored {
                                                     ui.label(
                                                         RichText::new("[모니터링 중]")
                                                             .size(10.0)
                                                             .color(Color32::GREEN),
                                                     );
-                                                } else if ui.small_button("+ 추가").clicked() {
-                                                    item_to_add = Some(row.display_name.clone());
+                                                } else if ui.small_button("+ 모니터링").clicked() {
+                                                    item_to_add_monitored = Some(row.display_name.clone());
+                                                }
+
+                                                // 찜 추가/해제 버튼
+                                                if is_fav {
+                                                    if ui.small_button(RichText::new("★ 찜됨").color(Color32::from_rgb(255, 215, 0))).clicked() {
+                                                        item_to_toggle_fav_from_search = Some(row.display_name.clone());
+                                                    }
+                                                } else if ui.small_button(RichText::new("⭐ 찜 추가").color(Color32::from_rgb(120, 220, 255))).clicked() {
+                                                    item_to_toggle_fav_from_search = Some(row.display_name.clone());
                                                 }
                                             },
                                         );
                                     });
                                 }
 
-                                if let Some(name) = item_to_add {
+                                if let Some(name) = item_to_toggle_fav_from_search {
+                                    self.toggle_favorite(&name);
+                                    if !self.monitored_items.contains(&name) {
+                                        self.add_item_to_monitored(&name);
+                                    }
+                                    self.selected_item = name;
+                                }
+                                if let Some(name) = item_to_add_monitored {
                                     self.add_item_to_monitored(&name);
                                 }
                             });
@@ -2347,6 +2462,7 @@ impl MobiMarketApp {
 
                 // 4. 단일 종합 가공 데카벌이 분석 그리드
                 let mut newly_selected = None;
+                let mut item_to_toggle_fav_from_material: Option<String> = None;
 
                 egui::Frame::none()
                     .fill(Color32::from_rgb(20, 24, 32))
@@ -2360,7 +2476,7 @@ impl MobiMarketApp {
                             .spacing([12.0, 7.0])
                             .show(ui, |ui| {
                                 // 헤더
-                                ui.label(RichText::new("품목명 (클릭 상세)").strong().color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("찜 / 품목명 (클릭 상세)").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("산출량").strong().color(Color32::LIGHT_GRAY));
                                 ui.label(RichText::new("거래소 판매가").strong().color(Color32::from_rgb(250, 180, 40)));
                                 ui.label(RichText::new("실수령액 (90%)").strong().color(Color32::from_rgb(180, 230, 160)));
@@ -2372,16 +2488,32 @@ impl MobiMarketApp {
 
                                 for row in &results {
                                     let is_selected = self.selected_material_name.as_deref() == Some(&row.name);
+                                    let is_fav = self.is_favorite(&row.name);
 
-                                    // 1. 품목명 (클릭 시 선택 토글)
-                                    let name_text = if is_selected {
-                                        RichText::new(format!("▶ {}", row.name)).color(Color32::from_rgb(255, 215, 0)).strong()
-                                    } else {
-                                        RichText::new(&row.name).strong()
-                                    };
-                                    if ui.selectable_label(is_selected, name_text).clicked() {
-                                        newly_selected = Some(row.name.clone());
-                                    }
+                                    // 1. 찜 토글 & 품목명
+                                    ui.horizontal(|ui| {
+                                        let (fav_icon, fav_color) = if is_fav {
+                                            ("★", Color32::from_rgb(255, 215, 0))
+                                        } else {
+                                            ("☆", Color32::from_rgb(120, 130, 145))
+                                        };
+                                        if ui.selectable_label(false, RichText::new(fav_icon).color(fav_color))
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .on_hover_text(if is_fav { "찜 해제" } else { "⭐ 찜 목록에 추가 (자동 모니터링)" })
+                                            .clicked()
+                                        {
+                                            item_to_toggle_fav_from_material = Some(row.name.clone());
+                                        }
+
+                                        let name_text = if is_selected {
+                                            RichText::new(format!("▶ {}", row.name)).color(Color32::from_rgb(255, 215, 0)).strong()
+                                        } else {
+                                            RichText::new(&row.name).strong()
+                                        };
+                                        if ui.selectable_label(is_selected, name_text).clicked() {
+                                            newly_selected = Some(row.name.clone());
+                                        }
+                                    });
 
                                     // 2. 산출량
                                     ui.label(RichText::new(format!("{}개", row.produced_per_craft)).color(Color32::GRAY));
@@ -2487,6 +2619,18 @@ impl MobiMarketApp {
                                         sel_row.market_price.map_or("-".to_string(), format_number),
                                         sel_row.revenue_net.map_or("-".to_string(), format_number)
                                     )).size(12.0).color(Color32::GRAY));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let is_fav = self.is_favorite(&sel_row.name);
+                                        let btn_text = if is_fav {
+                                            RichText::new("★ 관심 품목 찜 해제").color(Color32::from_rgb(255, 215, 0)).strong()
+                                        } else {
+                                            RichText::new("⭐ 관심 품목 찜하기").color(Color32::from_rgb(120, 220, 255)).strong()
+                                        };
+                                        if ui.button(btn_text).on_hover_text("1번째 탭 찜 목록 및 3번째 탭 견적 플래너에 즉시 등록합니다.").clicked() {
+                                            item_to_toggle_fav_from_material = Some(sel_row.name.clone());
+                                        }
+                                    });
                                 });
 
                                 ui.add_space(8.0);
@@ -2572,6 +2716,14 @@ impl MobiMarketApp {
                     }
                 }
 
+                if let Some(name) = item_to_toggle_fav_from_material {
+                    self.toggle_favorite(&name);
+                    if !self.monitored_items.contains(&name) {
+                        self.add_item_to_monitored(&name);
+                    }
+                    self.selected_item = name;
+                }
+
                 ui.add_space(16.0);
             });
     }
@@ -2597,4 +2749,9 @@ fn format_number(val: i64) -> String {
     } else {
         result
     }
+}
+
+/// 띄어쓰기 및 대소문자 무시 검색용 정규화 헬퍼 (공백 제거 + 소문자화)
+fn normalize_search_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
 }
