@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub const CLI_PATH: &str = r"C:\Nexon\MabinogiMobile\MabinogiMobile_CLI.exe";
 pub const DEFAULT_COLLECT_INTERVAL_SECS: u64 = 600; // 기본 10분 (600초)
+pub const APP_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// 5대 시세 비교 그룹 정의
 pub const GROUP_HIGH_VALUE: &[&str] = &[

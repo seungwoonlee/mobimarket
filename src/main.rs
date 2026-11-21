@@ -9,7 +9,7 @@ mod store;
 
 use cli::CliClient;
 use collector::Collector;
-use config::{get_db_path, DEFAULT_COLLECT_INTERVAL_SECS};
+use config::{get_db_path, APP_VERSION, DEFAULT_COLLECT_INTERVAL_SECS};
 use gui::MobiMarketApp;
 use std::sync::Arc;
 use store::Database;
@@ -56,11 +56,12 @@ fn main() -> Result<(), eframe::Error> {
     });
 
     // 6. eframe 네이티브 윈도우 창 옵션 설정 (1280x720 기본 해상도, 불필요한 설정 파일 저장 방지)
+    let window_title = format!("MobiMarket {} - 마비노기 모바일 마켓 시세 & 제작 계산기", APP_VERSION);
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([1000.0, 580.0])
-            .with_title("MobiMarket - 마비노기 모바일 마켓 시세 & 제작 계산기"),
+            .with_title(window_title),
         persist_window: false, // 다른 PC 실행 시 불필요한 AppData 창위치 캐시 파일 생성 방지
         ..Default::default()
     };
