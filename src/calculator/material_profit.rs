@@ -1,22 +1,34 @@
 use crate::config::{MaterialRecipeDef, MATERIAL_RECIPES};
 use std::collections::HashMap;
 
-/// 가공 재료 데카벌이 분석 결과 행
+/// 가공 재료 데카벌이 분석 결과 행 (2-Track 원가 및 노력 비교 모델)
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MaterialProfitRow {
     pub name: String,
     pub category: String,
     pub market_price: Option<i64>,
-    pub material_cost: Option<i64>,
     pub produced_per_craft: i64,
+    pub revenue_net: Option<i64>, // 실수령액 (판매가 * 산출량 * 90%)
     pub duration_secs: u32,
-    pub net_profit_per_craft: Option<i64>,
-    pub net_profit_per_unit: Option<i64>,
-    pub margin_ratio: Option<f64>,
-    pub hourly_profit: Option<i64>,
-    pub status_label: &'static str,
-    pub status_code: u8, // 4: 꿀벌이, 3: 쏠쏠함, 2: 박리다매, 1: 적자주의, 0: 시세대기
+
+    // 루트 A: 1차 원재료 거래소 직구매 제작 (최소 노력/시간)
+    pub primary_ing_name: &'static str,
+    pub primary_ing_qty: i64,
+    pub primary_cost: Option<i64>,
+    pub profit_primary: Option<i64>,
+    pub hourly_primary: Option<i64>,
+
+    // 루트 B: 2차 원재료 자체 가공 제작 (노력/시간 2배 투자)
+    pub secondary_ing_name: Option<&'static str>,
+    pub secondary_cost: Option<i64>,
+    pub profit_secondary: Option<i64>,
+    pub hourly_secondary: Option<i64>,
+
+    // 종합 추천 전략 및 배지
+    pub strategy_label: &'static str,
+    pub strategy_code: u8, // 3: 🔥 꿀벌이(자체가공), 2: ⚡ 간편제작(직구매흑자), 1: ⚠️ 직구매적자(자체필수), 0: 시세대기
+    pub is_primary_loss: bool,
 }
 
 /// 가공 재료 데카벌이 계산기
@@ -35,17 +47,17 @@ impl MaterialProfitCalculator {
             results.push(row);
         }
 
-        // 시간당 순이익 내림차순 정렬 (시세 없는 항목은 맨 뒤로)
+        // 자체 가공 순이익 내림차순 정렬 (시세 없는 항목은 맨 뒤로)
         results.sort_by(|a, b| {
-            let profit_b = b.hourly_profit.unwrap_or(i64::MIN);
-            let profit_a = a.hourly_profit.unwrap_or(i64::MIN);
+            let profit_b = b.profit_secondary.or(b.profit_primary).unwrap_or(i64::MIN);
+            let profit_a = a.profit_secondary.or(a.profit_primary).unwrap_or(i64::MIN);
             profit_b.cmp(&profit_a)
         });
 
         results
     }
 
-    /// 단일 품목 분석
+    /// 단일 품목 분석 (2-Track 모델)
     pub fn calculate_single(
         def: &MaterialRecipeDef,
         prices: &HashMap<String, i64>,
@@ -57,85 +69,93 @@ impl MaterialProfitCalculator {
             .unwrap_or(def.default_duration_secs)
             .max(1);
 
-        // 1. 완제품 거래소 판매 최저가
+        // 1. 완제품 거래소 판매 최저가 및 수수료 10% 제외 실수령액
         let market_price = prices.get(def.name).cloned();
+        let revenue_net = market_price.map(|p| {
+            (p as f64 * def.produced_per_craft as f64 * 0.90).round() as i64
+        });
 
-        // 2. 하위 원자재 총비용 산출 (모든 하위 재료의 시세가 존재해야 함)
-        let mut material_cost_sum = 0i64;
-        let mut all_ingredients_priced = true;
+        // 2. 루트 A: 1차 원재료 직구매 원가 및 순익
+        let (primary_name, primary_qty) = def.primary_ingredient;
+        let primary_unit_price = prices.get(primary_name).cloned();
+        let primary_cost = primary_unit_price.map(|p| p * primary_qty);
 
-        for (ing_name, ing_qty) in def.ingredients {
-            if let Some(ing_price) = prices.get(*ing_name) {
-                material_cost_sum += ing_price * ing_qty;
-            } else {
-                all_ingredients_priced = false;
-                break;
-            }
-        }
-
-        let material_cost = if all_ingredients_priced {
-            Some(material_cost_sum)
-        } else {
-            None
+        let profit_primary = match (revenue_net, primary_cost) {
+            (Some(rev), Some(cost)) => Some(rev - cost),
+            _ => None,
         };
 
-        // 3. 거래소 수수료 10% 차감 후 순마진 계산
-        let (net_profit_per_craft, net_profit_per_unit, margin_ratio, hourly_profit, status_label, status_code) =
-            if let (Some(m_price), Some(m_cost)) = (market_price, material_cost) {
-                // 실수령액: 판매가 * 1회 생산량 * 90%
-                let revenue = (m_price as f64 * def.produced_per_craft as f64 * 0.90).round() as i64;
-                let net_craft = revenue - m_cost;
-                let net_unit = net_craft / def.produced_per_craft.max(1);
-                let margin = if m_cost > 0 {
-                    (net_craft as f64 / m_cost as f64) * 100.0
-                } else {
-                    0.0
+        let hourly_primary = profit_primary.map(|net| {
+            let per_hour = 3600.0 / duration_secs as f64;
+            (per_hour * net as f64).round() as i64
+        });
+
+        let is_primary_loss = profit_primary.map_or(false, |p| p < 0);
+
+        // 3. 루트 B: 2차 원재료 자체 가공 원가 및 순익
+        let (secondary_ing_name, secondary_cost, profit_secondary, hourly_secondary) =
+            if let Some((sec_name, sec_qty, sec_prod)) = def.secondary_ingredient {
+                let sec_unit_price = prices.get(sec_name).cloned();
+                let sec_cost = sec_unit_price.map(|p| {
+                    let unit_cost = (p * sec_qty) as f64 / sec_prod as f64;
+                    (unit_cost * primary_qty as f64).round() as i64
+                });
+                let prof_sec = match (revenue_net, sec_cost) {
+                    (Some(rev), Some(cost)) => Some(rev - cost),
+                    _ => None,
                 };
-
-                // 시간당 생산 횟수 (3600초 / 1회 소요시간)
-                let per_hour_count = 3600.0 / duration_secs as f64;
-                let hourly = (per_hour_count * net_craft as f64).round() as i64;
-
-                // 상태 판정
-                let (label, code) = if hourly >= 30_000 {
-                    ("🔥 꿀벌이 (시급 3만+)", 4)
-                } else if hourly >= 10_000 {
-                    ("💰 쏠쏠함 (시급 1만+)", 3)
-                } else if hourly > 0 {
-                    ("⚖️ 박리다매 (소소한 수익)", 2)
-                } else {
-                    ("⚠️ 적자 주의 (제작 손해!)", 1)
-                };
-
-                (Some(net_craft), Some(net_unit), Some(margin), Some(hourly), label, code)
+                // 2차 가공은 시간 2배 소요 (duration * 2)
+                let hour_sec = prof_sec.map(|net| {
+                    let per_hour = 3600.0 / (duration_secs * 2) as f64;
+                    (per_hour * net as f64).round() as i64
+                });
+                (Some(sec_name), sec_cost, prof_sec, hour_sec)
             } else {
-                ("⚪ 시세 대기 중", 0, None, None, None, None)
-                    .map_empty()
+                (None, None, None, None)
             };
+
+        // 4. 종합 추천 전략 라벨 결정
+        let (strategy_label, strategy_code) = match (profit_primary, profit_secondary) {
+            (Some(p1), Some(p2)) => {
+                if p1 < 0 && p2 > 0 {
+                    ("⚠️ 직구매 적자 (자체 가공 필수)", 1)
+                } else if p2 >= 70 {
+                    ("🔥 꿀벌이 (자체 가공 추천)", 3)
+                } else if p1 > 0 {
+                    ("⚡ 간편 제작 (직구매도 흑자)", 2)
+                } else {
+                    ("⚠️ 적자 주의", 1)
+                }
+            }
+            (Some(p1), None) => {
+                if p1 > 0 {
+                    ("⚡ 간편 제작 추천", 2)
+                } else {
+                    ("⚠️ 직구매 적자", 1)
+                }
+            }
+            _ => ("⚪ 시세 대기 중", 0),
+        };
 
         MaterialProfitRow {
             name: def.name.to_string(),
             category: def.category.to_string(),
             market_price,
-            material_cost,
             produced_per_craft: def.produced_per_craft,
+            revenue_net,
             duration_secs,
-            net_profit_per_craft,
-            net_profit_per_unit,
-            margin_ratio,
-            hourly_profit,
-            status_label,
-            status_code,
+            primary_ing_name: primary_name,
+            primary_ing_qty: primary_qty,
+            primary_cost,
+            profit_primary,
+            hourly_primary,
+            secondary_ing_name,
+            secondary_cost,
+            profit_secondary,
+            hourly_secondary,
+            strategy_label,
+            strategy_code,
+            is_primary_loss,
         }
-    }
-}
-
-trait EmptyTupleHelper {
-    fn map_empty(self) -> (Option<i64>, Option<i64>, Option<f64>, Option<i64>, &'static str, u8);
-}
-
-impl EmptyTupleHelper for (&'static str, u8, Option<i64>, Option<i64>, Option<f64>, Option<i64>) {
-    fn map_empty(self) -> (Option<i64>, Option<i64>, Option<f64>, Option<i64>, &'static str, u8) {
-        (None, None, None, None, self.0, self.1)
     }
 }
