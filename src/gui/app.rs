@@ -1860,7 +1860,7 @@ impl MobiMarketApp {
                     ui.separator();
 
                     ui.label(RichText::new("액션 필터:").strong().color(Color32::LIGHT_GRAY));
-                    let action_chips = ["전체", "🔥 즉시구매만", "🎯 예약구매만", "⚠️ 고점주의만"];
+                    let action_chips = ["전체", "🔥 즉시구매만", "🎯 예약구매만", "⚠️ 신중/주의만"];
                     for chip in action_chips {
                         let selected = self.timing_action_filter == chip;
                         let text = RichText::new(chip).color(if selected {
@@ -1914,7 +1914,7 @@ impl MobiMarketApp {
 
                             let variance = prices[prices.len() - w_mid..].iter().map(|p| (p - sma_mid).powi(2)).sum::<f64>() / w_mid as f64;
                             let std_dev = variance.sqrt();
-                            let bb_lower = (sma_mid - (std_dev * 2.0)).max(1.0);
+                            let _bb_lower = (sma_mid - (std_dev * 2.0)).max(1.0);
                             let bb_upper = sma_mid + (std_dev * 2.0);
 
                             // 추세 진단 (단기 vs 중기 차이 비율)
@@ -1932,25 +1932,18 @@ impl MobiMarketApp {
                                 ("➡️ 횡보/보합", Color32::LIGHT_GRAY)
                             };
 
-                            // 예약구매 추천가 산출 (Sweet Spot: 과거 지지선 / BB하단 기반, 체결 확률 보장)
-                            let mut raw_reserve = if trend_diff < -1.2 {
-                                // 하향 추세일 땐 과거 바닥선(min_7d)에 가깝게 예약구매 제안
-                                (min_7d as f64 * 1.01).max(bb_lower)
+                            // 마비노기 모바일 예약구매 추천가 산출 (경매 최고가 우선 체결 룰 반영)
+                            // 원칙: 7일 최저가(min_7d)보다 낮으면 경쟁자에게 밀려 미체결되므로 항상 min_7d 이상이어야 함.
+                            let (reserve_price, saving_amount, saving_ratio) = if cur_price <= min_7d {
+                                // 현재가가 이미 7일 최저점 이하인 경우: 예약구매 불필요 (즉시 매수 타깃)
+                                (cur_price, 0, 0.0)
                             } else {
-                                // 횡보/상승 추세일 땐 단기 눌림목(-5%)을 노려 예약구매 제안
-                                cur_price as f64 * 0.95
-                            };
-
-                            // 가드레일: 현재가보다 최소 1 데카 이상 낮아야 하고, 현재가의 70% 밑으로는 내려가지 않음
-                            if raw_reserve >= cur_price as f64 {
-                                raw_reserve = (cur_price as f64 * 0.97).floor();
-                            }
-                            let reserve_price = (raw_reserve.max(cur_price as f64 * 0.70) as i64).max(1);
-                            let saving_amount = (cur_price - reserve_price).max(0);
-                            let saving_ratio = if cur_price > 0 {
-                                (saving_amount as f64 / cur_price as f64) * 100.0
-                            } else {
-                                0.0
+                                // 경쟁 우위 호가: 현재가의 약 96% 호가(경쟁자 제압)로 산출하되, min_7d 이상 보장
+                                let raw_target = ((cur_price as f64 * 0.96).round() as i64).max(min_7d);
+                                let final_reserve = raw_target.min(cur_price - 1).max(1);
+                                let saved = cur_price - final_reserve;
+                                let ratio = (saved as f64 / cur_price as f64) * 100.0;
+                                (final_reserve, saved, ratio)
                             };
 
                             // 골든타임 계산 (역사적으로 가장 싼 매물이 자주 등록되는 시간대)
@@ -1975,17 +1968,19 @@ impl MobiMarketApp {
                                 }
                             }
 
-                            // 추천 행동 포지션 및 경중도 매핑
-                            let (priority, action_label, action_color, action_desc) = if cur_price <= (min_7d as f64 * 1.02) as i64 && trend_diff > -1.0 {
-                                (4, "🔥 지금 즉시 구매 권장", Color32::from_rgb(255, 90, 90), "바닥권 도달 후 상승 반등 조짐, 즉시 매수 적기!")
+                            // 추천 행동 포지션 및 경중도 매핑 (게임 귀속/경매 메커니즘 특화)
+                            let (priority, action_label, action_color, action_desc) = if cur_price <= min_7d || (cur_price <= (min_7d as f64 * 1.01) as i64 && trend_diff > -0.5) {
+                                (4, "🔥 지금 즉시 구매 권장", Color32::from_rgb(255, 90, 90), "바닥권 도달/상승 전환! 지금 즉시 구매 적기")
                             } else if cur_price >= (max_7d as f64 * 0.98) as i64 || cur_price as f64 >= bb_upper {
-                                (1, "⚠️ 고점 매수 주의 (호구 방지)", Color32::from_rgb(255, 140, 50), "단기 고점 과열 상태, 지금 사면 손해!")
-                            } else if trend_diff < -1.2 && saving_ratio >= 3.0 {
-                                (3, "🎯 예약구매 적극 권장", Color32::from_rgb(255, 215, 0), "하향 추세 진행 중, 추천가로 예약구매 등록 추천!")
-                            } else if trend_diff < -3.0 {
-                                (2, "⏳ 하향 진행중 (매수 대기)", Color32::from_rgb(100, 210, 255), "하락 가팔라 추가 하락 가능성, 바닥 확인까지 대기!")
+                                (1, "🛑 고점 매수 주의 (호구 방지)", Color32::from_rgb(255, 140, 50), "단기 최고점 과열 상태, 지금 사면 손해!")
+                            } else if trend_diff < -1.2 {
+                                // 승운 피드백: 가격이 쭉 빠지고 있을 때는 예약구매를 신중히 하고 관망
+                                (2, "⚠️ 예약구매 신중 (하락 진행)", Color32::from_rgb(100, 210, 255), "하향 추세 진행 중! 예약구매 신중, 바닥 확인 대기")
+                            } else if cur_price > min_7d && saving_ratio >= 1.0 {
+                                // 보합세 또는 상승세: 매물이 마르거나 오르기 전 경쟁 우위 예약구매가로 선점
+                                (3, "🎯 예약구매 적극 권장", Color32::from_rgb(255, 215, 0), "보합/상승세! 경쟁 우위 예약구매가로 선점 추천")
                             } else {
-                                (0, "⚖️ 시세 안정 (적정 매수)", Color32::from_rgb(170, 185, 205), "적정 밴드 내 횡보 중, 필요 시 구매")
+                                (0, "⚖️ 시세 안정 (필요 시 매수)", Color32::from_rgb(170, 185, 205), "적정 밴드 내 횡보 중, 필요 시 구매")
                             };
 
                             analyzed_items.push(ItemAdvice {
@@ -2033,15 +2028,15 @@ impl MobiMarketApp {
                     });
                     cols[1].group(|ui| {
                         ui.set_width(ui.available_width());
-                        ui.label(RichText::new("🎯 예약구매 적극 권장 (하향 추세)").size(12.0).color(Color32::from_rgb(255, 200, 80)));
+                        ui.label(RichText::new("🎯 예약구매 적극 권장 (보합/상승)").size(12.0).color(Color32::from_rgb(255, 200, 80)));
                         ui.label(RichText::new(format!("{} 개 품목", count_reserve)).size(18.0).strong().color(Color32::from_rgb(255, 215, 0)));
-                        ui.label(RichText::new("하향 추세 진행 중, 추천가로 예약구매 등록 추천").size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("보합/상승세 유지 품목, 경쟁 우위 예약구매 선점").size(10.0).color(Color32::GRAY));
                     });
                     cols[2].group(|ui| {
                         ui.set_width(ui.available_width());
                         ui.label(RichText::new("💰 평균 예상 절감률 (예약구매 체결 시)").size(12.0).color(Color32::from_rgb(120, 220, 140)));
                         ui.label(RichText::new(format!("-{:.1}% 절약", avg_saving_ratio)).size(18.0).strong().color(Color32::from_rgb(100, 235, 120)));
-                        ui.label(RichText::new("현재 판매 중인 최저가 대비 예약구매 절감폭").size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("최근 7일 최저가 이상 경쟁 우위 호가 기준").size(10.0).color(Color32::GRAY));
                     });
                 });
 
@@ -2077,7 +2072,7 @@ impl MobiMarketApp {
                                     if self.timing_action_filter == "🎯 예약구매만" && item.priority != 3 {
                                         continue;
                                     }
-                                    if self.timing_action_filter == "⚠️ 고점주의만" && item.priority != 1 {
+                                    if self.timing_action_filter == "⚠️ 신중/주의만" && item.priority != 2 && item.priority != 1 {
                                         continue;
                                     }
 
