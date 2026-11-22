@@ -33,6 +33,7 @@ pub enum ItemGroup {
     Favorites,
     All,
     HighValue,
+    Materials,
     MagicStones,
     SoulStones,
     Boxes,
@@ -48,6 +49,7 @@ impl ItemGroup {
             ItemGroup::Favorites => "⭐ 찜 목록",
             ItemGroup::All => "전체",
             ItemGroup::HighValue => "고가템",
+            ItemGroup::Materials => "재료",
             ItemGroup::MagicStones => "마력석",
             ItemGroup::SoulStones => "영혼석",
             ItemGroup::Boxes => "상자류",
@@ -118,6 +120,9 @@ pub struct MobiMarketApp {
     material_sort_mode: MaterialSortMode,
     selected_material_name: Option<String>,
 
+    // 레시피 및 가공 재료 캐시 (프레임 렌더링 성능 최적화)
+    recipe_materials_cache: Vec<String>,
+
     // 마지막 갱신 틱 카운터
     last_refresh_tick: std::time::Instant,
 }
@@ -167,6 +172,7 @@ impl MobiMarketApp {
             custom_material_durations: HashMap::new(),
             material_sort_mode: MaterialSortMode::SecondaryProfit,
             selected_material_name: None,
+            recipe_materials_cache: crate::config::GROUP_MATERIALS.iter().map(|s| s.to_string()).collect(),
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
@@ -240,11 +246,39 @@ impl MobiMarketApp {
                     }
                 }
 
-                // 5. 모니터링 품목 + 모든 레시피 장비의 최신 최저가 및 스냅샷 조회 (ZZ 양방향 인덱싱 적용)
+                // 4-1. 레시피 하위 재료 + 10대 가공 재료 체인 캐시 갱신 (O(1) 고속 조회를 위한 프레임 최적화)
+                let mut mat_set = HashSet::new();
+                for r in &self.all_recipes {
+                    if let Ok(ings) = serde_json::from_str::<Vec<crate::cli::CraftIngredient>>(&r.ingredients_json) {
+                        for ing in ings {
+                            mat_set.insert(ing.display_name);
+                        }
+                    }
+                }
+                for def in crate::config::MATERIAL_RECIPES {
+                    mat_set.insert(def.name.to_string());
+                    mat_set.insert(def.primary_ingredient.0.to_string());
+                    if let Some(sec) = def.secondary_ingredient {
+                        mat_set.insert(sec.0.to_string());
+                    }
+                }
+                for &gm in crate::config::GROUP_MATERIALS {
+                    mat_set.insert(gm.to_string());
+                }
+                let mut mat_list: Vec<String> = mat_set.into_iter().collect();
+                mat_list.sort();
+                self.recipe_materials_cache = mat_list;
+
+                // 5. 모니터링 품목 + 모든 레시피 장비 + 모든 재료의 최신 최저가 및 스냅샷 조회 (ZZ 양방향 인덱싱 적용)
                 let mut all_target_items = self.monitored_items.clone();
                 for r in &self.all_recipes {
                     if !all_target_items.contains(&r.display_name) {
                         all_target_items.push(r.display_name.clone());
+                    }
+                }
+                for m in &self.recipe_materials_cache {
+                    if !all_target_items.contains(m) {
+                        all_target_items.push(m.clone());
                     }
                 }
                 for name in &all_target_items {
@@ -484,6 +518,15 @@ impl MobiMarketApp {
             }
             ItemGroup::All => self.monitored_items.clone(),
             ItemGroup::HighValue => GROUP_HIGH_VALUE.iter().map(|s| s.to_string()).collect(),
+            ItemGroup::Materials => {
+                if self.recipe_materials_cache.is_empty() {
+                    let mut list: Vec<String> = crate::config::GROUP_MATERIALS.iter().map(|s| s.to_string()).collect();
+                    list.sort();
+                    list
+                } else {
+                    self.recipe_materials_cache.clone()
+                }
+            }
             ItemGroup::MagicStones => GROUP_MAGIC_STONES.iter().map(|s| s.to_string()).collect(),
             ItemGroup::SoulStones => GROUP_SOUL_STONES.iter().map(|s| s.to_string()).collect(),
             ItemGroup::Boxes => GROUP_BOXES.iter().map(|s| s.to_string()).collect(),
@@ -909,6 +952,7 @@ impl MobiMarketApp {
                     for grp in &[
                         ItemGroup::Favorites,
                         ItemGroup::All,
+                        ItemGroup::Materials,
                         ItemGroup::HighValue,
                         ItemGroup::MagicStones,
                         ItemGroup::SoulStones,
@@ -1174,7 +1218,8 @@ impl MobiMarketApp {
                             };
 
                             let is_deletable = self.selected_group == ItemGroup::All
-                                && !crate::config::DEFAULT_MONITORED_NAMES.contains(&name.as_str());
+                                && !crate::config::DEFAULT_MONITORED_NAMES.contains(&name.as_str())
+                                && !crate::config::GROUP_MATERIALS.contains(&name.as_str());
 
                             ui.push_id(&name, |ui| {
                                 let row_height = 26.0;

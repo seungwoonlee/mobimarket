@@ -51,7 +51,7 @@ impl Collector {
             return Err("게임 클라이언트 미연동".to_string());
         }
 
-        // 2. 레시피 동기화 (잔영 / 해연 중심)
+        // 2. 레시피 동기화 (잔영 / 해연 중심) 및 재료 품목 자동 모니터링 등록
         if let Ok(craft_data) = self.cli.get_craftable_items().await {
             info!("총 {}개의 제작 레시피 수신 완료. 잔영/해연 동기화 중...", craft_data.items.len());
             for item in craft_data.items {
@@ -64,6 +64,11 @@ impl Collector {
                         item.critical_success_rate,
                         &ingredients_json,
                     ).await;
+
+                    // 레시피의 각 하위 재료를 monitored_items에 '재료' 그룹으로 자동 영구 등록
+                    for ing in &item.ingredients {
+                        let _ = self.db.add_monitored_item_ignore(&ing.display_name, "재료").await;
+                    }
                 }
             }
         }

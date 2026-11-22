@@ -1,2 +1,3 @@
 pub mod app;
-pub use app::MobiMarketApp;
+#[allow(unused_imports)]
+pub use app::{ItemGroup, MobiMarketApp};

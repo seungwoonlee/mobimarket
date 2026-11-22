@@ -86,9 +86,14 @@ impl Database {
 
         // 기본 모니터링 품목 초기 시드 등록
         for &name in crate::config::DEFAULT_MONITORED_NAMES {
+            let grp = if crate::config::GROUP_MATERIALS.contains(&name) {
+                "재료"
+            } else {
+                "기본"
+            };
             conn.execute(
-                "INSERT OR IGNORE INTO monitored_items (item_name, group_name) VALUES (?1, '기본')",
-                params![name],
+                "INSERT OR IGNORE INTO monitored_items (item_name, group_name) VALUES (?1, ?2)",
+                params![name, grp],
             )?;
         }
 
@@ -121,6 +126,17 @@ impl Database {
             );
         }
 
+        // 마이그레이션 v2: 신규 추가된 레시피 재료 및 가공재료들을 기존 DB에도 안전하게 자동 보충
+        if version < 2 {
+            for &name in crate::config::GROUP_MATERIALS {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO monitored_items (item_name, group_name) VALUES (?1, '재료')",
+                    params![name],
+                );
+            }
+            let _ = conn.execute("PRAGMA user_version = 2;", []);
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -144,6 +160,16 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO monitored_items (item_name, group_name, added_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)",
             params![item_name, group_name.unwrap_or("사용자 추가")],
+        )?;
+        Ok(())
+    }
+
+    /// 모니터링 품목이 없을 때만 추가 (기존 등록 일자 및 메타데이터 보존)
+    pub async fn add_monitored_item_ignore(&self, item_name: &str, group_name: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO monitored_items (item_name, group_name, added_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)",
+            params![item_name, group_name],
         )?;
         Ok(())
     }
