@@ -3,15 +3,46 @@ use crate::cli::models::{MarketRow, OwnedItem};
 use crate::cli::CliClient;
 use crate::collector::Collector;
 use crate::config::{
-    get_equipment_slot, is_job_equipment, EquipmentSlot, APP_VERSION, GROUP_BAGS, GROUP_BOXES, GROUP_HIGH_VALUE,
-    GROUP_MAGIC_STONES, GROUP_SOUL_STONES,
+    format_number, format_signed_number, get_equipment_slot, is_job_equipment, normalize_search_text,
+    EquipmentSlot, APP_VERSION, GROUP_BAGS, GROUP_BOXES, GROUP_HIGH_VALUE, GROUP_MAGIC_STONES,
+    GROUP_SOUL_STONES,
 };
 use crate::store::{Database, RecipeRecord, SnapshotRecord};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+
+struct RefreshPayload {
+    cli_connected: bool,
+    game_running: bool,
+    character_info: String,
+    job_name: String,
+    owned_items: Option<Vec<OwnedItem>>,
+    monitored_items: Option<Vec<String>>,
+    recipes: Option<Vec<RecipeRecord>>,
+    snapshots_grouped: Option<HashMap<String, Vec<SnapshotRecord>>>,
+    favorites: Option<HashSet<String>>,
+    from_retry_popup: bool,
+}
+
+enum AppAsyncEvent {
+    RefreshCompleted(RefreshPayload),
+    SearchCompleted {
+        seq: u64,
+        keyword: String,
+        rows: Vec<MarketRow>,
+    },
+    CalcCompleted {
+        seq: u64,
+        result: Option<CraftCalculationResult>,
+    },
+    MonitoredMutated {
+        select_item: Option<String>,
+    },
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
@@ -23,9 +54,9 @@ pub enum MainTab {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MaterialSortMode {
-    SecondaryProfit, // 자체 가공 순익순 (기본)
-    PrimaryProfit,   // 직구매 순익순
-    HourlyProfit,    // 시간당 시급순
+    Secondary, // 자체 가공 순익순 (기본)
+    Primary,   // 직구매 순익순
+    Hourly,    // 시간당 시급순
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -123,8 +154,16 @@ pub struct MobiMarketApp {
     // 레시피 및 가공 재료 캐시 (프레임 렌더링 성능 최적화)
     recipe_materials_cache: Vec<String>,
 
-    // 마지막 갱신 틱 카운터
+    // 마지막 갱신 틱 카운터 및 비동기 채널/시퀀스
     last_refresh_tick: std::time::Instant,
+    egui_ctx: egui::Context,
+    tx: Sender<AppAsyncEvent>,
+    rx: Receiver<AppAsyncEvent>,
+    is_refreshing: bool,
+    is_retrying_connector: bool,
+    last_seen_collection_epoch: u64,
+    search_seq: u64,
+    calc_seq: u64,
 }
 
 impl MobiMarketApp {
@@ -137,6 +176,9 @@ impl MobiMarketApp {
         setup_custom_fonts(&cc.egui_ctx);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
+        let (tx, rx) = mpsc::channel();
+        let initial_epoch = collector.collection_epoch.load(Ordering::Acquire);
+
         let mut app = Self {
             cli,
             db,
@@ -144,7 +186,7 @@ impl MobiMarketApp {
             active_tab: MainTab::MarketPrices,
             interval_minutes: 10, // 기본 10분
             cli_connected: false,
-            character_info: "미연동".to_string(),
+            character_info: "확인 중...".to_string(),
             job_name: "미연동".to_string(),
             owned_items_cache: Vec::new(),
             selected_group: ItemGroup::All,
@@ -170,190 +212,262 @@ impl MobiMarketApp {
             favorites: HashSet::new(),
             material_batch_count: 100,
             custom_material_durations: HashMap::new(),
-            material_sort_mode: MaterialSortMode::SecondaryProfit,
+            material_sort_mode: MaterialSortMode::Secondary,
             selected_material_name: None,
             recipe_materials_cache: crate::config::GROUP_MATERIALS.iter().map(|s| s.to_string()).collect(),
             show_ai_connector_popup: false,
             has_shown_ai_connector_popup: false,
             ai_connector_retry_failed: false,
             last_refresh_tick: std::time::Instant::now(),
+            egui_ctx: cc.egui_ctx.clone(),
+            tx,
+            rx,
+            is_refreshing: false,
+            is_retrying_connector: false,
+            last_seen_collection_epoch: initial_epoch,
+            search_seq: 0,
+            calc_seq: 0,
         };
 
-        app.refresh_data_sync();
+        app.trigger_refresh(false);
         app
     }
 
-    /// 동기적 데이터 갱신
-    pub fn refresh_data_sync(&mut self) {
+    /// 비동기 채널 이벤트 수신 및 UI 상태 반영 (메인 스레드 블로킹 없음)
+    fn poll_async_events(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                AppAsyncEvent::RefreshCompleted(payload) => {
+                    self.is_refreshing = false;
+                    self.cli_connected = payload.cli_connected;
+
+                    if !self.cli_connected {
+                        if payload.game_running && !self.has_shown_ai_connector_popup {
+                            self.show_ai_connector_popup = true;
+                            self.has_shown_ai_connector_popup = true;
+                        }
+                        if payload.from_retry_popup {
+                            self.is_retrying_connector = false;
+                            self.ai_connector_retry_failed = true;
+                        }
+                    } else {
+                        self.show_ai_connector_popup = false;
+                        self.ai_connector_retry_failed = false;
+                        self.is_retrying_connector = false;
+                        self.character_info = payload.character_info;
+                        self.job_name = payload.job_name;
+                        if let Some(items) = payload.owned_items {
+                            self.owned_items_cache = items;
+                        }
+                    }
+
+                    if let Some(items) = payload.monitored_items {
+                        self.monitored_items = items;
+                        if !self.monitored_items.contains(&self.selected_item)
+                            && !self.monitored_items.is_empty()
+                        {
+                            self.selected_item = self.monitored_items[0].clone();
+                        }
+                    }
+
+                    if let Some(recipes) = payload.recipes {
+                        self.all_recipes = recipes;
+                        if self.selected_recipe.is_none() && !self.all_recipes.is_empty() {
+                            let job = self.job_name.clone();
+                            if let Some(job_rec) = self
+                                .all_recipes
+                                .iter()
+                                .find(|r| is_job_equipment(&job, &r.display_name))
+                            {
+                                self.selected_recipe = Some(job_rec.clone());
+                            } else {
+                                self.selected_recipe = Some(self.all_recipes[0].clone());
+                            }
+                        }
+                    }
+
+                    // 레시피 하위 재료 + 가공 재료 캐시 갱신
+                    let mut mat_set = HashSet::new();
+                    for r in &self.all_recipes {
+                        if let Ok(ings) =
+                            serde_json::from_str::<Vec<crate::cli::CraftIngredient>>(&r.ingredients_json)
+                        {
+                            for ing in ings {
+                                mat_set.insert(ing.display_name);
+                            }
+                        }
+                    }
+                    for def in crate::config::MATERIAL_RECIPES {
+                        mat_set.insert(def.name.to_string());
+                        mat_set.insert(def.primary_ingredient.0.to_string());
+                        if let Some(sec) = def.secondary_ingredient {
+                            mat_set.insert(sec.0.to_string());
+                        }
+                    }
+                    for &gm in crate::config::GROUP_MATERIALS {
+                        mat_set.insert(gm.to_string());
+                    }
+                    let mut mat_list: Vec<String> = mat_set.into_iter().collect();
+                    mat_list.sort();
+                    self.recipe_materials_cache = mat_list;
+
+                    // 일괄 스냅샷 매핑 (ZZ 양방향 인덱싱)
+                    if let Some(grouped) = payload.snapshots_grouped {
+                        self.latest_prices.clear();
+                        self.snapshots_cache.clear();
+                        for (base_name, snaps) in grouped {
+                            if let Some(last) = snaps.last() {
+                                let zz_name = format!("{}ZZ", base_name);
+                                self.latest_prices.insert(base_name.clone(), last.min_unit_price);
+                                self.latest_prices.insert(zz_name.clone(), last.min_unit_price);
+                                self.snapshots_cache.insert(zz_name, snaps.clone());
+                                self.snapshots_cache.insert(base_name, snaps);
+                            }
+                        }
+                    }
+
+                    if let Some(favs) = payload.favorites {
+                        self.favorites = favs;
+                    }
+
+                    self.recalculate_cost();
+                }
+                AppAsyncEvent::SearchCompleted { seq, keyword, rows } => {
+                    if seq != self.search_seq {
+                        continue;
+                    }
+                    self.is_searching_market = false;
+                    if rows.is_empty() {
+                        self.search_error_msg =
+                            Some(format!("'{}' 검색 결과가 없습니다. (띄어쓰기 무시)", keyword));
+                    } else {
+                        self.search_error_msg = None;
+                    }
+                    self.market_search_results = rows;
+                }
+                AppAsyncEvent::CalcCompleted { seq, result } => {
+                    if seq == self.calc_seq {
+                        self.cost_calculation = result;
+                    }
+                }
+                AppAsyncEvent::MonitoredMutated { select_item } => {
+                    if let Some(item) = select_item {
+                        self.selected_item = item;
+                    }
+                    self.trigger_refresh(false);
+                }
+            }
+        }
+    }
+
+    /// 비동기 데이터 갱신 트리거 (UI 스레드 블로킹 제거, N+1 DB 쿼리 제거)
+    pub fn trigger_refresh(&mut self, from_retry_popup: bool) {
+        if self.is_refreshing && !from_retry_popup {
+            return;
+        }
+        self.is_refreshing = true;
+
         let cli = self.cli.clone();
         let db = self.db.clone();
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                // 1. CLI 상태 확인
-                if let Ok(st) = cli.check_status().await {
-                    self.cli_connected = st.pipe == "connected";
-                } else {
-                    self.cli_connected = false;
-                }
+        tokio::spawn(async move {
+            let cli_connected = match cli.check_status().await {
+                Ok(st) => st.pipe == "connected",
+                Err(_) => false,
+            };
 
-                // 게임 프로세스(MabinogiMobile)가 실행 중인데도 CLI 미연동 시 AI 커넥터 켜기 안내 팝업 자동 트리거 (최초 1회)
-                if !self.cli_connected {
-                    if crate::cli::client::is_game_process_running() && !self.has_shown_ai_connector_popup {
-                        self.show_ai_connector_popup = true;
-                        self.has_shown_ai_connector_popup = true;
-                    }
-                } else {
-                    self.show_ai_connector_popup = false;
-                    self.ai_connector_retry_failed = false;
-                }
+            let game_running = if !cli_connected {
+                tokio::task::spawn_blocking(crate::cli::client::is_game_process_running)
+                    .await
+                    .unwrap_or(false)
+            } else {
+                true
+            };
 
-                // 2. 캐릭터, 직업, 전체 보관함(가방+내창고+공용창고) 조회
-                if self.cli_connected {
-                    if let Ok(info) = cli.get_my_info().await {
-                        let realm = info.realm_name.unwrap_or_else(|| "서버".to_string());
-                        let lvl = info.level.unwrap_or(0);
-                        self.job_name = info.job_name.unwrap_or_else(|| "전투직업".to_string());
-                        self.character_info = format!("{} (Lv.{})", realm, lvl);
-                    }
-                    if let Ok(items) = cli.get_items().await {
-                        self.owned_items_cache = items;
-                    }
-                }
+            let mut character_info = "미연동".to_string();
+            let mut job_name = "미연동".to_string();
+            let mut owned_items = None;
 
-                // 3. 모니터링 품목 목록 조회
-                if let Ok(items) = db.get_monitored_items().await {
-                    self.monitored_items = items;
-                    if !self.monitored_items.contains(&self.selected_item) && !self.monitored_items.is_empty() {
-                        self.selected_item = self.monitored_items[0].clone();
-                    }
+            if cli_connected {
+                if let Ok(info) = cli.get_my_info().await {
+                    let realm = info.realm_name.unwrap_or_else(|| "서버".to_string());
+                    let lvl = info.level.unwrap_or(0);
+                    job_name = info.job_name.unwrap_or_else(|| "전투직업".to_string());
+                    character_info = format!("{} (Lv.{})", realm, lvl);
                 }
+                if let Ok(items) = cli.get_items().await {
+                    owned_items = Some(items);
+                }
+            }
 
-                // 4. 레시피 로드
-                if let Ok(recipes) = db.get_recipes(None).await {
-                    self.all_recipes = recipes;
-                    if self.selected_recipe.is_none() && !self.all_recipes.is_empty() {
-                        let job = self.job_name.clone();
-                        if let Some(job_rec) = self
-                            .all_recipes
-                            .iter()
-                            .find(|r| is_job_equipment(&job, &r.display_name))
-                        {
-                            self.selected_recipe = Some(job_rec.clone());
-                        } else {
-                            self.selected_recipe = Some(self.all_recipes[0].clone());
-                        }
-                    }
-                }
+            let monitored_items = db.get_monitored_items().await.ok();
+            let recipes = db.get_recipes(None).await.ok();
+            let snapshots_grouped = db.get_all_snapshots_grouped(5000).await.ok();
+            let favorites = db.get_all_favorites().await.ok();
 
-                // 4-1. 레시피 하위 재료 + 10대 가공 재료 체인 캐시 갱신 (O(1) 고속 조회를 위한 프레임 최적화)
-                let mut mat_set = HashSet::new();
-                for r in &self.all_recipes {
-                    if let Ok(ings) = serde_json::from_str::<Vec<crate::cli::CraftIngredient>>(&r.ingredients_json) {
-                        for ing in ings {
-                            mat_set.insert(ing.display_name);
-                        }
-                    }
-                }
-                for def in crate::config::MATERIAL_RECIPES {
-                    mat_set.insert(def.name.to_string());
-                    mat_set.insert(def.primary_ingredient.0.to_string());
-                    if let Some(sec) = def.secondary_ingredient {
-                        mat_set.insert(sec.0.to_string());
-                    }
-                }
-                for &gm in crate::config::GROUP_MATERIALS {
-                    mat_set.insert(gm.to_string());
-                }
-                let mut mat_list: Vec<String> = mat_set.into_iter().collect();
-                mat_list.sort();
-                self.recipe_materials_cache = mat_list;
-
-                // 5. 모니터링 품목 + 모든 레시피 장비 + 모든 재료의 최신 최저가 및 스냅샷 조회 (ZZ 양방향 인덱싱 적용)
-                let mut all_target_items = self.monitored_items.clone();
-                for r in &self.all_recipes {
-                    if !all_target_items.contains(&r.display_name) {
-                        all_target_items.push(r.display_name.clone());
-                    }
-                }
-                for m in &self.recipe_materials_cache {
-                    if !all_target_items.contains(m) {
-                        all_target_items.push(m.clone());
-                    }
-                }
-                for name in &all_target_items {
-                    if let Ok(snaps) = db.get_snapshot_history(name, 5000).await {
-                        if !snaps.is_empty() {
-                            if let Some(last) = snaps.last() {
-                                self.latest_prices.insert(name.clone(), last.min_unit_price);
-                                if name.ends_with("ZZ") {
-                                    self.latest_prices.insert(name.trim_end_matches("ZZ").to_string(), last.min_unit_price);
-                                } else {
-                                    self.latest_prices.insert(format!("{}ZZ", name), last.min_unit_price);
-                                }
-                            }
-                            if name.ends_with("ZZ") {
-                                self.snapshots_cache.insert(name.trim_end_matches("ZZ").to_string(), snaps.clone());
-                            } else {
-                                self.snapshots_cache.insert(format!("{}ZZ", name), snaps.clone());
-                            }
-                            self.snapshots_cache.insert(name.clone(), snaps);
-                        }
-                    }
-                }
-
-                // 6. 찜(Favorites) 목록 로드
-                if let Ok(favs) = db.get_all_favorites().await {
-                    self.favorites = favs;
-                }
-
-                // 7. 제작 계산 갱신
-                self.recalculate_cost();
-            });
+            let _ = tx.send(AppAsyncEvent::RefreshCompleted(RefreshPayload {
+                cli_connected,
+                game_running,
+                character_info,
+                job_name,
+                owned_items,
+                monitored_items,
+                recipes,
+                snapshots_grouped,
+                favorites,
+                from_retry_popup,
+            }));
+            ctx.request_repaint();
         });
     }
 
-    /// 거래소 전체 실시간 검색 실행 (띄어쓰기 무시 + 로컬 캐시 하이브리드 통합 검색)
+    /// 거래소 전체 실시간 검색 비동기 실행 (띄어쓰기 무시 + 로컬 캐시 하이브리드 통합 검색)
     pub fn search_market_online(&mut self) {
         let kw = self.market_search_keyword.trim().to_string();
         if kw.is_empty() {
             return;
         }
 
+        self.search_seq = self.search_seq.wrapping_add(1);
+        let seq = self.search_seq;
         self.is_searching_market = true;
         self.search_error_msg = None;
-        let cli = self.cli.clone();
 
-        // 1. 공백 제거 정규화 키워드 준비 (띄어쓰기 무시 매칭용)
+        let cli = self.cli.clone();
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
         let norm_kw = normalize_search_text(&kw);
 
-        // 2. 로컬 캐시 및 레시피 후보 선(先) 수집 (띄어쓰기 무시 매칭)
         let mut local_candidates: Vec<String> = Vec::new();
-        // (1) 가공 10대 레시피
         for def in crate::config::MATERIAL_RECIPES {
-            if normalize_search_text(def.name).contains(&norm_kw) && !local_candidates.contains(&def.name.to_string()) {
+            if normalize_search_text(def.name).contains(&norm_kw)
+                && !local_candidates.contains(&def.name.to_string())
+            {
                 local_candidates.push(def.name.to_string());
             }
         }
-        // (2) 제작 레시피
         for r in &self.all_recipes {
-            if normalize_search_text(&r.display_name).contains(&norm_kw) && !local_candidates.contains(&r.display_name) {
+            if normalize_search_text(&r.display_name).contains(&norm_kw)
+                && !local_candidates.contains(&r.display_name)
+            {
                 local_candidates.push(r.display_name.clone());
             }
         }
-        // (3) 모니터링 목록 및 기본 품목
         for m in &self.monitored_items {
             if normalize_search_text(m).contains(&norm_kw) && !local_candidates.contains(m) {
                 local_candidates.push(m.clone());
             }
         }
         for d in crate::config::DEFAULT_MONITORED_NAMES {
-            if normalize_search_text(d).contains(&norm_kw) && !local_candidates.contains(&d.to_string()) {
+            if normalize_search_text(d).contains(&norm_kw)
+                && !local_candidates.contains(&d.to_string())
+            {
                 local_candidates.push(d.to_string());
             }
         }
 
-        // 3. 온라인 CLI 질의 구성 (원본 키워드 + 공백제거 키워드 + 로컬 매칭 대표품목 최대 5개)
         let mut query_names = vec![kw.clone()];
         let no_space_kw = kw.replace(' ', "");
         if no_space_kw != kw && !no_space_kw.is_empty() {
@@ -365,112 +479,144 @@ impl MobiMarketApp {
             }
         }
 
-        let mut final_rows: Vec<MarketRow> = Vec::new();
-        let mut seen_names = HashSet::new();
+        let latest_prices_snap = self.latest_prices.clone();
+        let favorites_snap = self.favorites.clone();
 
-        // 4. 온라인 질의 실행
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Ok(res) = cli.get_market_prices(&query_names).await {
-                    if let Some(results) = res.results {
-                        for q in results {
-                            for r in q.rows {
-                                if !seen_names.contains(&r.display_name) {
-                                    seen_names.insert(r.display_name.clone());
-                                    final_rows.push(r);
-                                }
+        tokio::spawn(async move {
+            let mut final_rows: Vec<MarketRow> = Vec::new();
+            let mut seen_names = HashSet::new();
+
+            if let Ok(res) = cli.get_market_prices(&query_names).await {
+                if let Some(results) = res.results {
+                    for q in results {
+                        for r in q.rows {
+                            if !seen_names.contains(&r.display_name) {
+                                seen_names.insert(r.display_name.clone());
+                                final_rows.push(r);
                             }
                         }
                     }
                 }
+            }
+
+            for loc_name in local_candidates {
+                if !seen_names.contains(&loc_name) {
+                    seen_names.insert(loc_name.clone());
+                    let cached_price = latest_prices_snap
+                        .get(&loc_name)
+                        .or_else(|| {
+                            if loc_name.ends_with("ZZ") {
+                                latest_prices_snap.get(loc_name.trim_end_matches("ZZ"))
+                            } else {
+                                latest_prices_snap.get(&format!("{}ZZ", loc_name))
+                            }
+                        })
+                        .cloned();
+                    let is_fav = favorites_snap.contains(&loc_name)
+                        || favorites_snap.contains(&format!("{}ZZ", loc_name))
+                        || favorites_snap.contains(loc_name.trim_end_matches("ZZ"));
+
+                    final_rows.push(MarketRow {
+                        display_name: loc_name,
+                        rarity: None,
+                        star: None,
+                        season: None,
+                        main_attribute_range: None,
+                        favorite: Some(is_fav),
+                        in_stock: cached_price.is_some(),
+                        min_unit_price: cached_price,
+                    });
+                }
+            }
+
+            final_rows.sort_by(|a, b| {
+                let na = normalize_search_text(&a.display_name);
+                let nb = normalize_search_text(&b.display_name);
+                let a_exact = na == norm_kw;
+                let b_exact = nb == norm_kw;
+                if a_exact != b_exact {
+                    return b_exact.cmp(&a_exact);
+                }
+                na.cmp(&nb)
             });
+
+            let _ = tx.send(AppAsyncEvent::SearchCompleted {
+                seq,
+                keyword: kw,
+                rows: final_rows,
+            });
+            ctx.request_repaint();
         });
-
-        // 5. 로컬 매칭 품목 중 온라인 검색 결과에 누락된 항목을 Fallback으로 추가 (오프라인 상태 완벽 지원)
-        for loc_name in local_candidates {
-            if !seen_names.contains(&loc_name) {
-                seen_names.insert(loc_name.clone());
-                let cached_price = self.latest_prices.get(&loc_name).cloned();
-                final_rows.push(MarketRow {
-                    display_name: loc_name.clone(),
-                    rarity: None,
-                    star: None,
-                    season: None,
-                    main_attribute_range: None,
-                    favorite: Some(self.is_favorite(&loc_name)),
-                    in_stock: cached_price.is_some(),
-                    min_unit_price: cached_price,
-                });
-            }
-        }
-
-        // 띄어쓰기 무시 일치도에 따라 정렬 (완전 일치 우선, 그 다음 포함)
-        final_rows.sort_by(|a, b| {
-            let na = normalize_search_text(&a.display_name);
-            let nb = normalize_search_text(&b.display_name);
-            let a_exact = na == norm_kw;
-            let b_exact = nb == norm_kw;
-            if a_exact != b_exact {
-                return b_exact.cmp(&a_exact);
-            }
-            na.cmp(&nb)
-        });
-
-        if final_rows.is_empty() {
-            self.search_error_msg = Some(format!("'{}' 검색 결과가 없습니다. (띄어쓰기 무시)", kw));
-        } else {
-            self.search_error_msg = None;
-        }
-
-        self.market_search_results = final_rows;
-        self.is_searching_market = false;
     }
 
-    /// 모니터링 품목 추가
+    /// 모니터링 품목 추가 (비동기)
     pub fn add_item_to_monitored(&mut self, item_name: &str) {
         let db = self.db.clone();
         let name = item_name.to_string();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let _ = db.add_monitored_item(&name, Some("사용자 추가")).await;
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        if !self.monitored_items.contains(&name) {
+            self.monitored_items.push(name.clone());
+        }
+        self.selected_item = name.clone();
+
+        tokio::spawn(async move {
+            let _ = db.add_monitored_item(&name, Some("사용자 추가")).await;
+            let _ = tx.send(AppAsyncEvent::MonitoredMutated {
+                select_item: Some(name),
             });
+            ctx.request_repaint();
         });
-        self.selected_item = item_name.to_string();
-        self.refresh_data_sync();
     }
 
-    /// 모니터링 품목 제거
+    /// 모니터링 품목 제거 (비동기)
     pub fn remove_item_from_monitored(&mut self, item_name: &str) {
         let db = self.db.clone();
         let name = item_name.to_string();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let _ = db.remove_monitored_item(&name).await;
-            });
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        self.monitored_items.retain(|x| x != &name);
+
+        tokio::spawn(async move {
+            let _ = db.remove_monitored_item(&name).await;
+            let _ = tx.send(AppAsyncEvent::MonitoredMutated { select_item: None });
+            ctx.request_repaint();
         });
-        self.refresh_data_sync();
     }
 
-    /// 제작비용 재계산
+    /// 제작비용 비동기 재계산 (요청 시퀀스로 stale 결과 방지)
     fn recalculate_cost(&mut self) {
         let recipe = match &self.selected_recipe {
             Some(r) => r.clone(),
             None => return,
         };
 
+        self.calc_seq = self.calc_seq.wrapping_add(1);
+        let seq = self.calc_seq;
         let db = self.db.clone();
-        let qty = self.craft_quantity as i64;
+        let qty = (self.craft_quantity as i64).max(1);
         let owned_items = self.owned_items_cache.clone();
+        let has_live_inventory = self.cli_connected;
         let consider_success = self.craft_consider_success;
         let consider_critical = self.craft_consider_critical;
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
 
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let calc = CraftCalculator::new(db);
-                if let Ok(res) = calc.calculate(&recipe.display_name, qty, &owned_items, consider_success, consider_critical).await {
-                    self.cost_calculation = Some(res);
-                }
-            });
+        tokio::spawn(async move {
+            let calc = CraftCalculator::new(db);
+            let res = calc
+                .calculate(
+                    &recipe.display_name,
+                    qty,
+                    &owned_items,
+                    has_live_inventory,
+                    consider_success,
+                    consider_critical,
+                )
+                .await
+                .ok();
+            let _ = tx.send(AppAsyncEvent::CalcCompleted { seq, result: res });
+            ctx.request_repaint();
         });
     }
 
@@ -481,7 +627,7 @@ impl MobiMarketApp {
             || self.favorites.contains(item_name.trim_end_matches("ZZ"))
     }
 
-    /// 관심 장비/아이템 찜(Favorites) 토글 (메모리 및 DB 즉시 반영)
+    /// 관심 장비/아이템 찜(Favorites) 토글 (메모리 즉시 반영 + DB 비동기 저장)
     pub fn toggle_favorite(&mut self, item_name: &str) {
         let is_fav = self.is_favorite(item_name);
         let name = item_name.to_string();
@@ -491,19 +637,15 @@ impl MobiMarketApp {
             self.favorites.remove(&name);
             self.favorites.remove(&format!("{}ZZ", name));
             self.favorites.remove(name.trim_end_matches("ZZ"));
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let _ = db.remove_favorite(&name).await;
-                    let _ = db.remove_favorite(&format!("{}ZZ", name)).await;
-                    let _ = db.remove_favorite(name.trim_end_matches("ZZ")).await;
-                });
+            tokio::spawn(async move {
+                let _ = db.remove_favorite(&name).await;
+                let _ = db.remove_favorite(&format!("{}ZZ", name)).await;
+                let _ = db.remove_favorite(name.trim_end_matches("ZZ")).await;
             });
         } else {
             self.favorites.insert(name.clone());
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let _ = db.add_favorite(&name).await;
-                });
+            tokio::spawn(async move {
+                let _ = db.add_favorite(&name).await;
             });
         }
     }
@@ -668,6 +810,15 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
 impl eframe::App for MobiMarketApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_async_events();
+
+        // 백그라운드/수동 수집 완료(epoch 증가) 감지 시 즉시 UI 캐시 비동기 갱신
+        let current_epoch = self.collector.collection_epoch.load(Ordering::Acquire);
+        if current_epoch != self.last_seen_collection_epoch {
+            self.last_seen_collection_epoch = current_epoch;
+            self.trigger_refresh(false);
+        }
+
         if self.last_refresh_tick.elapsed().as_secs() >= 2 {
             self.last_refresh_tick = std::time::Instant::now();
             let cur_interval = self.interval_minutes as u64 * 60;
@@ -741,7 +892,6 @@ impl eframe::App for MobiMarketApp {
                             self.show_ai_connector_popup = true;
                         } else {
                             self.collector.request_immediate_run();
-                            self.refresh_data_sync();
                         }
                     }
 
@@ -914,19 +1064,21 @@ impl MobiMarketApp {
 
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("  다시 연결 시도  ").strong().color(Color32::WHITE)).clicked() {
-                        self.refresh_data_sync();
-                        if self.cli_connected {
-                            self.show_ai_connector_popup = false;
-                            self.ai_connector_retry_failed = false;
-                        } else {
-                            self.ai_connector_retry_failed = true;
-                        }
+                    if self.is_retrying_connector {
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(RichText::new("  연결 확인 중...  ").color(Color32::YELLOW)),
+                        );
+                    } else if ui.button(RichText::new("  다시 연결 시도  ").strong().color(Color32::WHITE)).clicked() {
+                        self.ai_connector_retry_failed = false;
+                        self.is_retrying_connector = true;
+                        self.trigger_refresh(true);
                     }
 
                     if ui.button("  닫기  ").clicked() {
                         self.show_ai_connector_popup = false;
                         self.ai_connector_retry_failed = false;
+                        self.is_retrying_connector = false;
                     }
                 });
                 ui.add_space(6.0);
@@ -991,7 +1143,9 @@ impl MobiMarketApp {
                     if text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.search_market_online();
                     }
-                    if ui.button("검색").clicked() {
+                    if self.is_searching_market {
+                        ui.add_enabled(false, egui::Button::new("검색 중..."));
+                    } else if ui.button("검색").clicked() {
                         self.search_market_online();
                     }
                 });
@@ -1131,16 +1285,18 @@ impl MobiMarketApp {
 
                 ui.add_space(2.0);
 
-                // HTS 4열 고정 컬럼 헤더 라인 (데이터 행과 1:1 수직 칼정렬)
+                // HTS 4열 반응형 컬럼 좌표 계산 (스크롤바 폭을 고려해 헤더와 데이터 행 1:1 수직 칼정렬)
                 let h_available_w = ui.available_width();
+                let table_ref_w = (h_available_w - 14.0).max(460.0);
                 let (h_rect, _) = ui.allocate_exact_size(
                     egui::vec2(h_available_w, 20.0),
                     egui::Sense::hover(),
                 );
                 let h_base_x = h_rect.min.x;
                 let h_center_y = h_rect.center().y;
+                let (h_col_cur, h_col_min, h_col_max, _) = compute_market_columns(h_base_x, table_ref_w);
 
-                // 컬럼 1: 찜 & 품목명 (여유 너비 ~350px 확보)
+                // 컬럼 1: 찜 & 품목명
                 ui.painter().text(
                     egui::pos2(h_base_x + 6.0, h_center_y),
                     egui::Align2::LEFT_CENTER,
@@ -1157,7 +1313,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 2: 현재가
                 ui.painter().text(
-                    egui::pos2(h_base_x + 360.0, h_center_y),
+                    egui::pos2(h_col_cur, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "현재가",
                     egui::FontId::proportional(11.0),
@@ -1165,7 +1321,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 3: 기간 최저
                 ui.painter().text(
-                    egui::pos2(h_base_x + 455.0, h_center_y),
+                    egui::pos2(h_col_min, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "기간 최저",
                     egui::FontId::proportional(11.0),
@@ -1173,7 +1329,7 @@ impl MobiMarketApp {
                 );
                 // 컬럼 4: 기간 최고
                 ui.painter().text(
-                    egui::pos2(h_base_x + 550.0, h_center_y),
+                    egui::pos2(h_col_max, h_center_y),
                     egui::Align2::RIGHT_CENTER,
                     "기간 최고",
                     egui::FontId::proportional(11.0),
@@ -1185,7 +1341,7 @@ impl MobiMarketApp {
                 let mut item_to_toggle_fav: Option<String> = None;
 
                 let upper_overhead = if self.market_search_results.is_empty() { 155.0 } else { 355.0 };
-                let list_height = (total_height - upper_overhead).max(430.0);
+                let list_height = (total_height - upper_overhead).max(380.0);
 
                 egui::ScrollArea::vertical()
                     .id_salt("market_items_list_scroll")
@@ -1232,6 +1388,7 @@ impl MobiMarketApp {
 
                                 let base_x = rect.min.x;
                                 let center_y = rect.center().y;
+                                let (col_cur, col_min, col_max, del_left) = compute_market_columns(base_x, table_ref_w);
 
                                 let mut del_clicked = false;
                                 let mut fav_clicked = false;
@@ -1253,8 +1410,8 @@ impl MobiMarketApp {
 
                                 if is_deletable {
                                     let del_rect = egui::Rect::from_min_max(
-                                        egui::pos2(base_x + 558.0, rect.min.y + 3.0),
-                                        egui::pos2(base_x + 582.0, rect.max.y - 3.0),
+                                        egui::pos2(del_left, rect.min.y + 3.0),
+                                        egui::pos2((del_left + 26.0).min(rect.max.x - 2.0), rect.max.y - 3.0),
                                     );
                                     let del_resp = ui
                                         .interact(del_rect, ui.id().with("del_btn"), egui::Sense::click())
@@ -1306,13 +1463,17 @@ impl MobiMarketApp {
                                     fav_color,
                                 );
 
-                                // 컬럼 1: 좌측 품목명 텍스트 페인팅 (여유 너비 ~350px로 20자 이상 긴 이름도 가격과 겹치지 않음)
+                                // 컬럼 1: 좌측 품목명 텍스트 페인팅 (가격 컬럼 침범 방지를 위한 클리핑)
                                 let text_color = if is_selected {
                                     Color32::WHITE
                                 } else {
                                     Color32::from_rgb(210, 220, 230)
                                 };
-                                ui.painter().text(
+                                let name_clip = egui::Rect::from_min_max(
+                                    egui::pos2(base_x + 26.0, rect.min.y),
+                                    egui::pos2((col_cur - 76.0).max(base_x + 80.0), rect.max.y),
+                                );
+                                ui.painter().with_clip_rect(name_clip).text(
                                     egui::pos2(base_x + 28.0, center_y),
                                     egui::Align2::LEFT_CENTER,
                                     &name,
@@ -1323,7 +1484,7 @@ impl MobiMarketApp {
                                 // 컬럼 2: 현재가 (골드)
                                 let cur_price_color = Color32::from_rgb(250, 190, 80);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 360.0, center_y),
+                                    egui::pos2(col_cur, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     cur_price_str,
                                     egui::FontId::proportional(11.5),
@@ -1333,17 +1494,17 @@ impl MobiMarketApp {
                                 // 컬럼 3: 기간 최저가 (청량한 민트/하늘)
                                 let min_price_color = Color32::from_rgb(100, 210, 255);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 455.0, center_y),
+                                    egui::pos2(col_min, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     min_price_str,
                                     egui::FontId::proportional(11.5),
                                     min_price_color,
                                 );
 
-                                // 컬럼 4: 기간 최고가 (산뜻한 로즈/오렌지 - is_deletable 상관없이 항상 base_x + 550.0 고정)
+                                // 컬럼 4: 기간 최고가 (산뜻한 로즈/오렌지)
                                 let max_price_color = Color32::from_rgb(255, 120, 120);
                                 ui.painter().text(
-                                    egui::pos2(base_x + 550.0, center_y),
+                                    egui::pos2(col_max, center_y),
                                     egui::Align2::RIGHT_CENTER,
                                     max_price_str,
                                     egui::FontId::proportional(11.5),
@@ -1486,6 +1647,11 @@ impl MobiMarketApp {
                     .include_y(y_include_min) // 변동량 가시성을 살리는 최적 하한선 (음수 방지)
                     .include_y(y_include_max) // 변동량 가시성을 살리는 최적 상한선
                     .clamp_grid(true) // 그리드가 마이너스로 스크롤/줌 되지 않도록 제약
+                    .x_axis_formatter(|mark, _range| {
+                        chrono::DateTime::from_timestamp(mark.value as i64, 0)
+                            .map(|dt| dt.format("%m/%d %H:%M").to_string())
+                            .unwrap_or_default()
+                    })
                     .y_axis_formatter(|mark, _range| {
                         if mark.value < 0.0 {
                             "0".to_string()
@@ -1510,7 +1676,7 @@ impl MobiMarketApp {
                                     let points: PlotPoints = snaps
                                         .iter()
                                         .enumerate()
-                                        .map(|(i, s)| [i as f64, s.min_unit_price as f64])
+                                        .map(|(i, s)| [snapshot_to_plot_x(s, i), s.min_unit_price as f64])
                                         .collect();
 
                                     let is_highest_vol = most_volatile_item.as_ref() == Some(item_name);
@@ -1548,7 +1714,7 @@ impl MobiMarketApp {
                                 let points: PlotPoints = snaps
                                     .iter()
                                     .enumerate()
-                                    .map(|(i, s)| [i as f64, s.min_unit_price as f64])
+                                    .map(|(i, s)| [snapshot_to_plot_x(s, i), s.min_unit_price as f64])
                                     .collect();
 
                                 let price_str = if let Some(p) = self.get_cached_price(&self.selected_item) {
@@ -1841,7 +2007,7 @@ impl MobiMarketApp {
                                 self.recalculate_cost();
                             }
                             ui.label(
-                                RichText::new(format!("{} 개", self.craft_quantity))
+                                RichText::new(format!("{} 회", self.craft_quantity))
                                     .size(15.0)
                                     .strong(),
                             );
@@ -1849,7 +2015,7 @@ impl MobiMarketApp {
                                 self.craft_quantity = (self.craft_quantity - 1).max(1);
                                 self.recalculate_cost();
                             }
-                            ui.label("제작 수량:");
+                            ui.label("제작 횟수:");
                         });
                     });
 
@@ -1919,9 +2085,9 @@ impl MobiMarketApp {
 
                         ui.add_space(8.0);
 
-                        // 추천 판정 배너 (네모 박스 깨짐 방지: [추천], [주의] 기호 사용)
+                        // 추천 판정 배너 (시세 누락 시 추천 차단)
                         let verdict_text = &calc.recommendation;
-                        let is_craft_recommended = calc.saving_amount.unwrap_or(0) > 0;
+                        let is_craft_recommended = !calc.has_missing_prices && calc.saving_amount.unwrap_or(0) > 0;
                         let banner_bg = if is_craft_recommended {
                             Color32::from_rgb(25, 55, 35)
                         } else {
@@ -2369,21 +2535,21 @@ impl MobiMarketApp {
 
         // 1. 유저 정렬 모드 반영
         match self.material_sort_mode {
-            MaterialSortMode::SecondaryProfit => {
+            MaterialSortMode::Secondary => {
                 results.sort_by(|a, b| {
                     let pb = b.profit_secondary.or(b.profit_primary).unwrap_or(i64::MIN);
                     let pa = a.profit_secondary.or(a.profit_primary).unwrap_or(i64::MIN);
                     pb.cmp(&pa)
                 });
             }
-            MaterialSortMode::PrimaryProfit => {
+            MaterialSortMode::Primary => {
                 results.sort_by(|a, b| {
                     let pb = b.profit_primary.unwrap_or(i64::MIN);
                     let pa = a.profit_primary.unwrap_or(i64::MIN);
                     pb.cmp(&pa)
                 });
             }
-            MaterialSortMode::HourlyProfit => {
+            MaterialSortMode::Hourly => {
                 results.sort_by(|a, b| {
                     let hb = b.hourly_secondary.or(b.hourly_primary).unwrap_or(i64::MIN);
                     let ha = a.hourly_secondary.or(a.hourly_primary).unwrap_or(i64::MIN);
@@ -2436,9 +2602,9 @@ impl MobiMarketApp {
                     ui.label(RichText::new("정렬 기준:").strong().color(Color32::LIGHT_GRAY));
 
                     let sort_options = [
-                        (MaterialSortMode::SecondaryProfit, "👑 [루트 B] 자체 가공 순익순"),
-                        (MaterialSortMode::PrimaryProfit, "⚡ [루트 A] 1차 직구매 순익순"),
-                        (MaterialSortMode::HourlyProfit, "⏱️ 시간당 시급순"),
+                        (MaterialSortMode::Secondary, "👑 [루트 B] 자체 가공 순익순"),
+                        (MaterialSortMode::Primary, "⚡ [루트 A] 1차 직구매 순익순"),
+                        (MaterialSortMode::Hourly, "⏱️ 시간당 시급순"),
                     ];
                     for (mode, label) in sort_options {
                         let is_active = self.material_sort_mode == mode;
@@ -2581,15 +2747,15 @@ impl MobiMarketApp {
 
                                     // 5. [루트 A] 1차 직구매 순익 (툴팁: 1차 재료비)
                                     let (pri_str, pri_color, pri_tip) = if let Some(net1) = row.profit_primary {
-                                        let c_str = format!("{:+}", format_number(net1));
+                                        let c_str = format_signed_number(net1);
                                         let color = if net1 > 0 {
                                             Color32::from_rgb(100, 235, 120)
                                         } else {
                                             Color32::from_rgb(255, 90, 90)
                                         };
-                                        let tip = format!("• 1차 원재료: {} x {}개 (투입비용: {} 데카)\n• 실수령액: {} 데카\n• 순마진: {:+} 데카",
+                                        let tip = format!("• 1차 원재료: {} x {}개 (투입비용: {} 데카)\n• 실수령액: {} 데카\n• 순마진: {} 데카",
                                             row.primary_ing_name, row.primary_ing_qty, format_number(row.primary_cost.unwrap_or(0)),
-                                            format_number(row.revenue_net.unwrap_or(0)), net1);
+                                            format_number(row.revenue_net.unwrap_or(0)), format_signed_number(net1));
                                         (c_str, color, tip)
                                     } else {
                                         ("-".to_string(), Color32::GRAY, "시세 미수집".to_string())
@@ -2599,7 +2765,7 @@ impl MobiMarketApp {
 
                                     // 6. [루트 B] 2차 자체 가공 순익 (툴팁: 2차 재료비 및 가공 단계)
                                     let (sec_str, sec_color, sec_tip) = if let Some(net2) = row.profit_secondary {
-                                        let c_str = format!("{:+}", format_number(net2));
+                                        let c_str = format_signed_number(net2);
                                         let color = if net2 >= 70 {
                                             Color32::from_rgb(255, 215, 0)
                                         } else if net2 > 0 {
@@ -2608,8 +2774,8 @@ impl MobiMarketApp {
                                             Color32::from_rgb(255, 90, 90)
                                         };
                                         let sec_name = row.secondary_ing_name.unwrap_or("-");
-                                        let tip = format!("• 2차 하위재료: [{}] 자체 가공 단계 거침\n• 환산 투입원가: {} 데카\n• 2회 연속 가공 순마진: {:+} 데카",
-                                            sec_name, format_number(row.secondary_cost.unwrap_or(0)), net2);
+                                        let tip = format!("• 2차 하위재료: [{}] 자체 가공 단계 거침\n• 환산 투입원가: {} 데카\n• 2회 연속 가공 순마진: {} 데카",
+                                            sec_name, format_number(row.secondary_cost.unwrap_or(0)), format_signed_number(net2));
                                         (c_str, color, tip)
                                     } else {
                                         ("- (단일 단계)".to_string(), Color32::GRAY, "2차 가공 단계 없음 (단일 단계 가공품)".to_string())
@@ -2693,8 +2859,8 @@ impl MobiMarketApp {
                                         ui.add_space(4.0);
 
                                         let p_cost = sel_row.primary_cost.map_or("-".to_string(), format_number);
-                                        let p_net = sel_row.profit_primary.map_or("-".to_string(), |n| format!("{:+}", format_number(n)));
-                                        let p_hourly = sel_row.hourly_primary.map_or("-".to_string(), |h| format!("{:+}", format_number(h)));
+                                        let p_net = sel_row.profit_primary.map_or("-".to_string(), format_signed_number);
+                                        let p_hourly = sel_row.hourly_primary.map_or("-".to_string(), format_signed_number);
                                         let color = if sel_row.profit_primary.unwrap_or(0) > 0 { Color32::from_rgb(100, 235, 120) } else { Color32::from_rgb(255, 90, 90) };
 
                                         ui.label(format!("• 투입 원재료: {} x {}개", sel_row.primary_ing_name, sel_row.primary_ing_qty));
@@ -2706,22 +2872,30 @@ impl MobiMarketApp {
                                     // 우측: 루트 B (2차 자체 가공)
                                     cols[1].group(|ui| {
                                         ui.set_width(ui.available_width());
+                                        let sec_total_dur = sel_row.secondary_duration_secs.unwrap_or(sel_row.duration_secs.saturating_mul(2));
                                         ui.horizontal(|ui| {
                                             ui.label(RichText::new("🔥 [루트 B] 2차 원재료 자체 가공 제작").strong().color(Color32::from_rgb(255, 120, 120)));
-                                            ui.label(RichText::new("(노력/시간 2배 투자)").size(11.0).color(Color32::GRAY));
+                                            ui.label(RichText::new(format!("(총 {}초 소요)", sec_total_dur)).size(11.0).color(Color32::GRAY));
                                         });
                                         ui.add_space(4.0);
 
                                         if let Some(sec_name) = sel_row.secondary_ing_name {
                                             let s_cost = sel_row.secondary_cost.map_or("-".to_string(), format_number);
-                                            let s_net = sel_row.profit_secondary.map_or("-".to_string(), |n| format!("{:+}", format_number(n)));
-                                            let s_hourly = sel_row.hourly_secondary.map_or("-".to_string(), |h| format!("{:+}", format_number(h)));
-                                            let s_color = if sel_row.profit_secondary.unwrap_or(0) >= 70 { Color32::from_rgb(255, 215, 0) } else { Color32::from_rgb(100, 235, 120) };
+                                            let s_net = sel_row.profit_secondary.map_or("-".to_string(), format_signed_number);
+                                            let s_hourly = sel_row.hourly_secondary.map_or("-".to_string(), format_signed_number);
+                                            let sec_val = sel_row.profit_secondary.unwrap_or(0);
+                                            let s_color = if sec_val >= 70 {
+                                                Color32::from_rgb(255, 215, 0)
+                                            } else if sec_val > 0 {
+                                                Color32::from_rgb(100, 235, 120)
+                                            } else {
+                                                Color32::from_rgb(255, 90, 90)
+                                            };
 
                                             ui.label(format!("• 2차 하위재료: [{}] 자체 가공 단계 거침", sec_name));
                                             ui.label(format!("• 환산 투입원가: {} 데카", s_cost));
                                             ui.label(RichText::new(format!("• 2회 연속 순마진: {} 데카", s_net)).strong().color(s_color));
-                                            ui.label(RichText::new(format!("• 시간당 시급: {} 데카/h (소요시간: {}초)", s_hourly, sel_row.duration_secs * 2)).color(Color32::LIGHT_GRAY));
+                                            ui.label(RichText::new(format!("• 시간당 시급: {} 데카/h (총 소요시간: {}초)", s_hourly, sec_total_dur)).color(Color32::LIGHT_GRAY));
                                         } else {
                                             ui.label("• 2차 하위 가공 단계가 없는 단일 단계 가공품입니다.");
                                             ui.label("• 1차 원재료를 직구매하여 즉시 가공하는 [루트 A]를 이용하십시오.");
@@ -2740,18 +2914,33 @@ impl MobiMarketApp {
                                     .inner_margin(10.0)
                                     .show(ui, |ui| {
                                         if sel_row.is_primary_loss {
-                                            let saved = sel_row.profit_secondary.unwrap_or(0) - sel_row.profit_primary.unwrap_or(0);
-                                            ui.label(RichText::new(format!("⚠️ [직구매 적자 경고]: [{}]은 1차 재료를 거래소에서 바로 사서 제작하면 10% 판매 수수료 때문에 1회당 {} 데카의 손해가 발생합니다! 반드시 2차 재료 [{}]부터 자체 가공하십시오. (1회당 +{} 데카 흑자 반전)",
-                                                sel_row.name,
-                                                sel_row.profit_primary.map_or(0, |n| -n),
-                                                sel_row.secondary_ing_name.unwrap_or("하위재료"),
-                                                saved
-                                            )).color(Color32::from_rgb(255, 100, 100)).strong());
+                                            if let Some(p2) = sel_row.profit_secondary {
+                                                if p2 > 0 {
+                                                    let saved = p2 - sel_row.profit_primary.unwrap_or(0);
+                                                    ui.label(RichText::new(format!("⚠️ [직구매 적자 경고]: [{}]은 1차 재료를 거래소에서 바로 사서 제작하면 10% 판매 수수료 때문에 1회당 {} 데카의 손해가 발생합니다! 반드시 2차 재료 [{}]부터 자체 가공하십시오. (1회당 +{} 데카 흑자 반전)",
+                                                        sel_row.name,
+                                                        sel_row.profit_primary.map_or(0, |n| -n),
+                                                        sel_row.secondary_ing_name.unwrap_or("하위재료"),
+                                                        format_number(saved)
+                                                    )).color(Color32::from_rgb(255, 100, 100)).strong());
+                                                } else {
+                                                    ui.label(RichText::new(format!("⚠️ [전 구간 적자 경고]: [{}]은 현재 시세 기준 1차 직구매({} 데카)와 2차 자체 가공({} 데카) 모두 판매 수수료 10% 차감 후 손해가 발생합니다. 시세 회복 시 제작을 권장합니다.",
+                                                        sel_row.name,
+                                                        sel_row.profit_primary.map_or_else(|| "-".to_string(), format_signed_number),
+                                                        format_signed_number(p2)
+                                                    )).color(Color32::from_rgb(255, 100, 100)).strong());
+                                                }
+                                            } else {
+                                                ui.label(RichText::new(format!("⚠️ [직구매 적자 경고]: [{}]은 현재 시세 기준 1차 재료를 매입해 제작하면 판매 수수료 10% 차감 후 1회당 {} 데카 손해가 발생합니다.",
+                                                    sel_row.name,
+                                                    sel_row.profit_primary.map_or(0, |n| -n)
+                                                )).color(Color32::from_rgb(255, 100, 100)).strong());
+                                            }
                                         } else if let (Some(p1), Some(p2)) = (sel_row.profit_primary, sel_row.profit_secondary) {
                                             let saved = p2 - p1;
                                             ui.label(RichText::new(format!("💡 [노력 대비 추천]: 2차 재료 [{}]부터 직접 가공하면 1회당 {} 데카가 더 절약되어 순이익이 크게 증가합니다! 시간 여유가 있을 때는 자체 가공을, 빠른 회전이 필요할 때는 직구매를 추천합니다.",
                                                 sel_row.secondary_ing_name.unwrap_or("하위재료"),
-                                                saved
+                                                format_number(saved)
                                             )).color(Color32::from_rgb(120, 230, 140)).strong());
                                         } else {
                                             ui.label(RichText::new("💡 [간편 제작 추천]: 1차 재료를 거래소에서 바로 매입하여 가공해도 안정적인 수익이 보장되는 품목입니다.").color(Color32::from_rgb(100, 215, 255)).strong());
@@ -2774,29 +2963,19 @@ impl MobiMarketApp {
     }
 }
 
-/// 숫자 1000단위 콤마 포맷터
-fn format_number(val: i64) -> String {
-    let s = val.to_string();
-    let is_negative = s.starts_with('-');
-    let raw = if is_negative { &s[1..] } else { &s };
-
-    let mut result = String::new();
-    let len = raw.len();
-    for (i, c) in raw.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-
-    if is_negative {
-        format!("-{}", result)
-    } else {
-        result
-    }
+/// 시세 목록 반응형 4열 컬럼 X좌표 계산: (현재가, 기간최저, 기간최고, 삭제버튼 좌측)
+fn compute_market_columns(base_x: f32, available_w: f32) -> (f32, f32, f32, f32) {
+    let w = available_w.max(460.0);
+    let del_left = base_x + w - 28.0;
+    let col_max = del_left - 8.0;
+    let col_min = col_max - 92.0;
+    let col_cur = col_min - 92.0;
+    (col_cur, col_min, col_max, del_left)
 }
 
-/// 띄어쓰기 및 대소문자 무시 검색용 정규화 헬퍼 (공백 제거 + 소문자화)
-fn normalize_search_text(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+/// 스냅샷 시각 문자열("%Y-%m-%d %H:%M:%S")을 차트 X축 타임스탬프(초)로 변환
+fn snapshot_to_plot_x(snap: &SnapshotRecord, fallback_idx: usize) -> f64 {
+    chrono::NaiveDateTime::parse_from_str(&snap.scraped_at, "%Y-%m-%d %H:%M:%S")
+        .map(|dt| dt.and_utc().timestamp() as f64)
+        .unwrap_or(fallback_idx as f64)
 }

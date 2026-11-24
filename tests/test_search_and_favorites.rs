@@ -1,8 +1,7 @@
+use mobi_market::config::normalize_search_text;
+
 #[test]
 fn test_whitespace_normalization_for_search() {
-    fn normalize_search_text(s: &str) -> String {
-        s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
-    }
 
     assert_eq!(normalize_search_text("특급목재"), "특급목재");
     assert_eq!(normalize_search_text("특급 목재"), "특급목재");

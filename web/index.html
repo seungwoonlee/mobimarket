@@ -310,18 +310,24 @@
         data = history.map(h => h.price);
       } else {
         const item = marketData.latest_items.find(i => i.name === itemName);
-        const p = item ? item.price : 10000;
-        labels = ["09:00", "10:00", "11:00", "12:00", "현재"];
-        data = [p, p, p, p, p];
+        if (item && item.price != null) {
+          labels = ["현재"];
+          data = [item.price];
+        }
       }
 
-      const curPrice = data[data.length - 1] || 0;
-      const minPrice = Math.min(...data);
-      const maxPrice = Math.max(...data);
-
-      document.getElementById("stat-current").innerText = Number(curPrice).toLocaleString() + " 데카";
-      document.getElementById("stat-min").innerText = Number(minPrice).toLocaleString() + " 데카";
-      document.getElementById("stat-max").innerText = Number(maxPrice).toLocaleString() + " 데카";
+      if (data.length > 0) {
+        const curPrice = data[data.length - 1];
+        const minPrice = Math.min(...data);
+        const maxPrice = Math.max(...data);
+        document.getElementById("stat-current").innerText = Number(curPrice).toLocaleString() + " 데카";
+        document.getElementById("stat-min").innerText = Number(minPrice).toLocaleString() + " 데카";
+        document.getElementById("stat-max").innerText = Number(maxPrice).toLocaleString() + " 데카";
+      } else {
+        document.getElementById("stat-current").innerText = "시세 없음";
+        document.getElementById("stat-min").innerText = "-";
+        document.getElementById("stat-max").innerText = "-";
+      }
 
       const ctx = document.getElementById("priceChart").getContext("2d");
       if (chartInstance) chartInstance.destroy();
@@ -361,21 +367,31 @@
       });
     }
 
+    function findLatestItem(name) {
+      const alt = name.endsWith("ZZ") ? name.slice(0, -2) : name + "ZZ";
+      return marketData.latest_items.find(i => i.name === name || i.name === alt);
+    }
+
     function loadRecipe() {
       const recName = document.getElementById("recipe-select").value;
       const recipe = marketData.recipes.find(r => r.name === recName);
       if (!recipe) return;
 
-      document.getElementById("slider-success").value = recipe.success_rate || 50;
-      document.getElementById("slider-critical").value = recipe.critical_rate || 12;
-      document.getElementById("val-success").innerText = (recipe.success_rate || 50) + "%";
-      document.getElementById("val-critical").innerText = (recipe.critical_rate || 12) + "%";
+      const rawSucc = recipe.success_rate ?? 50;
+      const rawCrit = recipe.critical_rate ?? 12;
+      const normSucc = rawSucc > 0 && rawSucc <= 1 ? rawSucc * 100 : rawSucc;
+      const normCrit = rawCrit > 0 && rawCrit <= 1 ? rawCrit * 100 : rawCrit;
+
+      document.getElementById("slider-success").value = normSucc;
+      document.getElementById("slider-critical").value = normCrit;
+      document.getElementById("val-success").innerText = normSucc + "%";
+      document.getElementById("val-critical").innerText = normCrit + "%";
 
       const cont = document.getElementById("ingredients-container");
       cont.innerHTML = "";
       recipe.ingredients.forEach((ing, idx) => {
-        const itemInfo = marketData.latest_items.find(i => i.name === ing.DisplayName);
-        const defaultPrice = itemInfo ? itemInfo.price : 100;
+        const itemInfo = findLatestItem(ing.DisplayName);
+        const defaultPrice = itemInfo ? itemInfo.price : 0;
 
         const row = document.createElement("div");
         row.className = "flex items-center justify-between gap-2 p-1.5 rounded bg-gray-900/60 border border-gray-800";
@@ -406,36 +422,55 @@
       document.getElementById("val-critical").innerText = crit + "%";
       document.getElementById("val-fee").innerText = (feeRate * 100).toFixed(0) + "%";
 
-      // 재료비 합산
+      // 재료비 합산 (0원 입력은 미수집으로 간주)
       let totalMatCost = 0;
+      let hasMissing = false;
       const inputs = document.querySelectorAll("[id^='ing-price-']");
       inputs.forEach(inp => {
         const req = parseFloat(inp.getAttribute("data-req"));
         const price = parseFloat(inp.value) || 0;
+        if (price <= 0) hasMissing = true;
         totalMatCost += req * price;
       });
 
-      // 완제품 산출 기대치: (성공확률) * 1 + (성공 중 대성공 확률) * 1
+      const recName = document.getElementById("recipe-select").value;
+      const recipe = marketData.recipes.find(r => r.name === recName);
+      const produced = Math.max(1, (recipe && recipe.produced) ? recipe.produced : 1);
+
+      // 완제품 산출 기대치: pSuccess * (produced + pCritical)
       const pSuccess = succ / 100.0;
-      const pCritical = (succ / 100.0) * (crit / 100.0);
-      const expectedYield = pSuccess + pCritical;
+      const pCritical = crit / 100.0;
+      const expectedYield = pSuccess * (produced + pCritical);
 
       // 완제품 거래소 최저가
-      const recName = document.getElementById("recipe-select").value;
-      const targetItem = marketData.latest_items.find(i => i.name === recName);
-      const marketPrice = targetItem ? targetItem.price : (totalMatCost * 1.5);
+      const targetItem = findLatestItem(recName);
+      const marketPrice = targetItem ? targetItem.price : null;
+
+      document.getElementById("res-material-cost").innerText = hasMissing
+        ? Math.round(totalMatCost).toLocaleString() + " 데카 (일부 미입력)"
+        : Math.round(totalMatCost).toLocaleString() + " 데카";
+      document.getElementById("res-expected-yield").innerText = expectedYield.toFixed(2) + " 개";
+
+      const profitEl = document.getElementById("res-net-profit");
+      const roiEl = document.getElementById("res-roi");
+
+      if (marketPrice == null || hasMissing) {
+        document.getElementById("res-market-price").innerText = marketPrice != null
+          ? Math.round(marketPrice).toLocaleString() + " 데카"
+          : "시세 없음";
+        profitEl.innerText = "계산 불가";
+        profitEl.className = "text-lg font-bold text-gray-400";
+        roiEl.innerText = "시세 미수집 품목 존재";
+        roiEl.className = "text-xs text-gray-500";
+        return;
+      }
 
       // 기대 판매 순익 = 기대산출량 * 판매가 * (1 - 수수료) - 재료비
       const expectedRevenue = expectedYield * marketPrice * (1.0 - feeRate);
       const netProfit = expectedRevenue - totalMatCost;
       const roi = totalMatCost > 0 ? (netProfit / totalMatCost) * 100.0 : 0;
 
-      document.getElementById("res-material-cost").innerText = Math.round(totalMatCost).toLocaleString() + " 데카";
-      document.getElementById("res-expected-yield").innerText = expectedYield.toFixed(2) + " 개";
       document.getElementById("res-market-price").innerText = Math.round(marketPrice).toLocaleString() + " 데카";
-
-      const profitEl = document.getElementById("res-net-profit");
-      const roiEl = document.getElementById("res-roi");
 
       if (netProfit >= 0) {
         profitEl.innerText = "+" + Math.round(netProfit).toLocaleString() + " 데카";

@@ -8,39 +8,55 @@ MobiMarket 시계열 데이터 분석 및 최적 매수 타이밍 도출 (analyz
 
 import os
 import sqlite3
+from contextlib import closing
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-def get_db_path() -> Path:
+def get_db_path() -> Path | None:
     env_path = os.environ.get("MOBIMARKET_DB_PATH")
-    if env_path and Path(env_path).exists():
-        return Path(env_path)
+    if env_path:
+        p = Path(env_path)
+        return p if p.exists() else None
+    root_dir = Path(__file__).resolve().parent.parent
     candidates = [
+        Path("data/mobi_market.db"),
         Path("target/release/mobi_market.db"),
         Path("target/debug/mobi_market.db"),
         Path("mobi_market.db"),
+        root_dir / "data" / "mobi_market.db",
+        root_dir / "target" / "release" / "mobi_market.db",
+        root_dir / "target" / "debug" / "mobi_market.db",
+        root_dir / "mobi_market.db",
     ]
     for c in candidates:
         if c.exists():
             return c
-    return Path("target/release/mobi_market.db")
+    return None
 
 def load_data(limit_per_item: int = 500) -> pd.DataFrame:
     db_path = get_db_path()
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    
-    query = """
-    SELECT item_name, min_unit_price, in_stock, scraped_at
-    FROM market_snapshots
-    ORDER BY id ASC
-    """
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    if db_path is None:
+        raise FileNotFoundError("MobiMarket SQLite DB 파일을 찾을 수 없습니다.")
 
-    df['scraped_at'] = pd.to_datetime(df['scraped_at'])
+    with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)) as conn:
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        query = """
+        SELECT item_name, min_unit_price, in_stock, scraped_at
+        FROM (
+            SELECT
+                item_name, min_unit_price, in_stock, scraped_at,
+                ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY scraped_at DESC, id DESC) AS rn
+            FROM market_snapshots
+        )
+        WHERE rn <= ?
+        ORDER BY scraped_at ASC
+        """
+        df = pd.read_sql_query(query, conn, params=(limit_per_item,))
+
+    df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
+    df = df.dropna(subset=['scraped_at']).copy()
     df['hour'] = df['scraped_at'].dt.hour
     df['day_name'] = df['scraped_at'].dt.day_name()
     df['date'] = df['scraped_at'].dt.date
@@ -66,8 +82,9 @@ def analyze_item(df: pd.DataFrame, item_name: str):
     mean_price = prices.mean()
     min_price = prices.min()
     max_price = prices.max()
-    std_price = prices.std()
-    cv = (std_price / mean_price * 100) if mean_price > 0 else 0
+    std_raw = prices.std()
+    std_price = 0.0 if pd.isna(std_raw) else float(std_raw)
+    cv = (std_price / mean_price * 100) if mean_price > 0 else 0.0
 
     print(f"\n========================================================")
     print(f"📊 [시계열 분석 리포트] {item_name}")

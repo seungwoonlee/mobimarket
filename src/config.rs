@@ -3,6 +3,7 @@ use std::path::PathBuf;
 pub const CLI_PATH: &str = r"C:\Nexon\MabinogiMobile\MabinogiMobile_CLI.exe";
 pub const DEFAULT_COLLECT_INTERVAL_SECS: u64 = 600; // 기본 10분 (600초)
 pub const APP_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+pub const MARKET_FEE_RATE: f64 = 0.10; // 거래소 판매 수수료 (10%)
 
 /// 5대 시세 비교 그룹 정의
 pub const GROUP_HIGH_VALUE: &[&str] = &[
@@ -272,9 +273,17 @@ impl EquipmentSlot {
     }
 }
 
+fn has_armor_token(name: &str, token: &str) -> bool {
+    name == token
+        || name.ends_with(token)
+        || name.ends_with(&format!("{}ZZ", token))
+        || name.contains(&format!(" {}", token))
+}
+
 /// 아이템 이름으로 장비 부위 판별
 /// - 장신구는 오직 '네크리스'와 '링' 2가지뿐임!
 /// - '마블 힐링 완드' 등 '힐링'이 포함된 아이템이 '링'으로 오분류되지 않도록 방어
+/// - '허상의 마력석' 등이 '상의'로 인해 방어구로 오분류되지 않도록 토큰 경계 검사
 pub fn get_equipment_slot(name: &str) -> EquipmentSlot {
     let is_ring = name.contains(" 링")
         || name.ends_with("링ZZ")
@@ -283,8 +292,13 @@ pub fn get_equipment_slot(name: &str) -> EquipmentSlot {
 
     if name.contains("네크리스") || is_ring {
         EquipmentSlot::Accessory
-    } else if name.contains("갑옷") || name.contains("전투복") || name.contains("상의")
-        || name.contains("하의") || name.contains("투구") || name.contains("장갑") || name.contains("신발")
+    } else if name.contains("갑옷")
+        || name.contains("전투복")
+        || has_armor_token(name, "상의")
+        || has_armor_token(name, "하의")
+        || has_armor_token(name, "투구")
+        || has_armor_token(name, "장갑")
+        || has_armor_token(name, "신발")
     {
         EquipmentSlot::Armor
     } else if name.contains("소드") || name.contains("부채") || name.contains("코일")
@@ -308,14 +322,13 @@ pub fn is_job_equipment(job_name: &str, item_name: &str) -> bool {
 
     // 1. 장신구 (네크리스, 링 2종류만 전 직업 공용)
     if slot == EquipmentSlot::Accessory {
-        let is_ring = item_name.contains(" 링")
-            || item_name.ends_with("링ZZ")
-            || item_name.ends_with("링")
-            || (item_name.contains("링") && !item_name.contains("힐링"));
-        return item_name.contains("네크리스") || is_ring;
+        return true;
     }
 
     let job = job_name.trim();
+    if job.is_empty() || job == "미연동" {
+        return true;
+    }
 
     // 2. 직업별 1:1 고유 무기 및 방어구 매칭
     // 석궁사수: 라이트 크로스보우 + 가죽 갑옷
@@ -495,4 +508,36 @@ pub fn get_db_path() -> PathBuf {
     } else {
         PathBuf::from("mobi_market.db")
     }
+}
+
+/// 숫자 1000단위 콤마 포맷터 (i64::MIN 안전 처리)
+pub fn format_number(val: i64) -> String {
+    let raw = val.unsigned_abs().to_string();
+    let mut result = String::with_capacity(raw.len() + raw.len() / 3 + 1);
+    let len = raw.len();
+    for (i, c) in raw.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    if val < 0 {
+        format!("-{}", result)
+    } else {
+        result
+    }
+}
+
+/// 부호(+/-) 포함 숫자 1000단위 콤마 포맷터
+pub fn format_signed_number(val: i64) -> String {
+    if val > 0 {
+        format!("+{}", format_number(val))
+    } else {
+        format_number(val)
+    }
+}
+
+/// 띄어쓰기 및 대소문자 무시 검색용 정규화 헬퍼 (공백 제거 + 소문자화)
+pub fn normalize_search_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
 }
