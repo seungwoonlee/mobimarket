@@ -10,67 +10,79 @@ import os
 import sys
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
-def get_db_path() -> Path:
+def get_db_path() -> Path | None:
     env_path = os.environ.get("MOBIMARKET_DB_PATH")
-    if env_path and Path(env_path).exists():
-        return Path(env_path)
-    
-    # 후보 탐색 (루트 기준 및 상대 경로)
+    if env_path:
+        p = Path(env_path)
+        return p if p.exists() else None
+
+    root_dir = Path(__file__).resolve().parent.parent.parent
     candidates = [
+        Path("data/mobi_market.db"),
         Path("target/release/mobi_market.db"),
         Path("target/debug/mobi_market.db"),
         Path("mobi_market.db"),
-        Path(__file__).resolve().parent.parent.parent / "target" / "release" / "mobi_market.db",
-        Path(__file__).resolve().parent.parent.parent / "mobi_market.db"
+        root_dir / "data" / "mobi_market.db",
+        root_dir / "target" / "release" / "mobi_market.db",
+        root_dir / "target" / "debug" / "mobi_market.db",
+        root_dir / "mobi_market.db",
     ]
     for c in candidates:
         if c.exists():
             return c
-    return Path("target/release/mobi_market.db")
+    return None
 
 def get_connection():
     db_path = get_db_path()
-    conn = sqlite3.connect(str(db_path))
+    if db_path is None:
+        raise FileNotFoundError("MobiMarket SQLite DB 파일을 찾을 수 없습니다. (MOBIMARKET_DB_PATH 확인 필요)")
+    conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
 
-# 1. 도구: 특정 품목 시세 조회
-def tool_get_price(item_name: str) -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
+def get_zz_variants(name: str) -> list[str]:
+    if name.endswith("ZZ"):
+        return [name, name[:-2]]
+    return [name, name + "ZZ"]
 
-    # ZZ 양방향 Fallback
-    target_names = [item_name]
-    if item_name.endswith("ZZ"):
-        target_names.append(item_name[:-2])
-    else:
-        target_names.append(item_name + "ZZ")
-
-    placeholders = ",".join("?" for _ in target_names)
-    cur.execute(f"""
+def fetch_latest_snapshot(cur, item_name: str):
+    variants = get_zz_variants(item_name)
+    placeholders = ",".join("?" for _ in variants)
+    cur.execute(
+        f"""
         SELECT item_name, min_unit_price, in_stock, scraped_at
         FROM market_snapshots
         WHERE item_name IN ({placeholders})
-        ORDER BY id DESC LIMIT 1
-    """, target_names)
-    latest = cur.fetchone()
+        ORDER BY scraped_at DESC, id DESC
+        LIMIT 1
+        """,
+        variants,
+    )
+    return cur.fetchone()
 
-    if not latest:
-        conn.close()
-        return {"error": f"품목 '{item_name}'의 시세 기록을 찾을 수 없습니다."}
+# 1. 도구: 특정 품목 시세 조회
+def tool_get_price(item_name: str) -> dict:
+    with closing(get_connection()) as conn:
+        cur = conn.cursor()
+        latest = fetch_latest_snapshot(cur, item_name)
+        if not latest:
+            return {"error": f"품목 '{item_name}'의 시세 기록을 찾을 수 없습니다."}
 
-    matched_name, price, in_stock, scraped_at = latest[0], latest[1], bool(latest[2]), latest[3]
-
-    # 기간 통계
-    cur.execute(f"""
-        SELECT MIN(min_unit_price), MAX(min_unit_price), AVG(min_unit_price), COUNT(*)
-        FROM market_snapshots
-        WHERE item_name = ?
-    """, (matched_name,))
-    stats = cur.fetchone()
-    conn.close()
+        matched_name, price, in_stock, scraped_at = latest[0], latest[1], bool(latest[2]), latest[3]
+        variants = get_zz_variants(matched_name)
+        placeholders = ",".join("?" for _ in variants)
+        cur.execute(
+            f"""
+            SELECT MIN(min_unit_price), MAX(min_unit_price), AVG(min_unit_price), COUNT(*)
+            FROM market_snapshots
+            WHERE item_name IN ({placeholders})
+            """,
+            variants,
+        )
+        stats = cur.fetchone()
 
     return {
         "item_name": matched_name,
@@ -79,107 +91,122 @@ def tool_get_price(item_name: str) -> dict:
         "scraped_at": scraped_at,
         "period_min_price": stats[0],
         "period_max_price": stats[1],
-        "period_avg_price": round(stats[2], 1) if stats[2] else price,
-        "snapshot_count": stats[3]
+        "period_avg_price": round(stats[2], 1) if stats[2] is not None else price,
+        "snapshot_count": stats[3],
     }
 
 # 2. 도구: 모니터링 품목 목록 및 시세 요약
 def tool_list_monitored() -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT item_name, min_unit_price, in_stock, scraped_at
-        FROM market_snapshots
-        WHERE id IN (
-            SELECT MAX(id) FROM market_snapshots GROUP BY item_name
-        )
-        ORDER BY item_name ASC
-    """)
-    items = []
-    for r in cur.fetchall():
-        items.append({
-            "name": r[0],
-            "current_price": r[1],
-            "in_stock": bool(r[2]),
-            "scraped_at": r[3]
-        })
-    conn.close()
+    with closing(get_connection()) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT s.item_name, s.min_unit_price, s.in_stock, s.scraped_at
+            FROM market_snapshots s
+            INNER JOIN (
+                SELECT item_name, MAX(id) AS max_id
+                FROM market_snapshots
+                GROUP BY item_name
+            ) latest ON s.id = latest.max_id
+            ORDER BY s.item_name ASC
+        """)
+        items = [
+            {
+                "name": r[0],
+                "current_price": r[1],
+                "in_stock": bool(r[2]),
+                "scraped_at": r[3],
+            }
+            for r in cur.fetchall()
+        ]
     return {"total_count": len(items), "items": items}
 
 # 3. 도구: 제작 레시피 마진 및 순익 계산
 def tool_calculate_craft(recipe_name: str, success_override: float = None) -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
+    with closing(get_connection()) as conn:
+        cur = conn.cursor()
+        variants = get_zz_variants(recipe_name)
+        placeholders = ",".join("?" for _ in variants)
+        cur.execute(
+            f"""
+            SELECT display_name, produced_per_craft, success_rate, critical_success_rate, ingredients_json
+            FROM recipes
+            WHERE display_name IN ({placeholders})
+            LIMIT 1
+            """,
+            variants,
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"error": f"제작 레시피 '{recipe_name}'을(를) 찾을 수 없습니다."}
 
-    # ZZ 양방향 Fallback
-    target_names = [recipe_name]
-    if recipe_name.endswith("ZZ"):
-        target_names.append(recipe_name[:-2])
-    else:
-        target_names.append(recipe_name + "ZZ")
+        matched_name, produced, succ_rate, crit_rate, ing_json = (
+            row[0],
+            max(1, int(row[1] or 1)),
+            float(row[2] or 0.0),
+            float(row[3] or 0.0),
+            row[4],
+        )
+        if success_override is not None:
+            succ_rate = float(success_override)
 
-    placeholders = ",".join("?" for _ in target_names)
-    cur.execute(f"""
-        SELECT display_name, produced_per_craft, success_rate, critical_success_rate, ingredients_json
-        FROM recipes
-        WHERE display_name IN ({placeholders})
-        LIMIT 1
-    """, target_names)
-    row = cur.fetchone()
+        # 0~1 vs 0~100 정규화
+        norm_succ = succ_rate * 100.0 if 0.0 < succ_rate <= 1.0 else succ_rate
+        norm_crit = crit_rate * 100.0 if 0.0 < crit_rate <= 1.0 else crit_rate
 
-    if not row:
-        conn.close()
-        return {"error": f"제작 레시피 '{recipe_name}'을(를) 찾을 수 없습니다."}
+        try:
+            ingredients = json.loads(ing_json)
+        except Exception:
+            ingredients = []
 
-    matched_name, produced, succ_rate, crit_rate, ing_json = row[0], row[1], row[2], row[3], row[4]
-    if success_override is not None:
-        succ_rate = success_override
+        total_mat_cost = 0
+        missing_prices = []
+        ing_details = []
+        for ing in ingredients:
+            ing_name = ing.get("DisplayName", "")
+            req_count = int(ing.get("Required", 1))
+            snap = fetch_latest_snapshot(cur, ing_name)
+            unit_price = snap[1] if snap else None
 
-    try:
-        ingredients = json.loads(ing_json)
-    except Exception:
-        ingredients = []
+            if unit_price is None:
+                missing_prices.append(ing_name)
+                cost = None
+            else:
+                cost = req_count * unit_price
+                total_mat_cost += cost
 
-    # 재료비 산출
-    total_mat_cost = 0
-    ing_details = []
-    for ing in ingredients:
-        ing_name = ing.get("DisplayName", "")
-        req_count = ing.get("Required", 1)
+            ing_details.append({
+                "name": ing_name,
+                "required": req_count,
+                "unit_price": unit_price,
+                "cost": cost,
+            })
 
-        # 재료 최신 시세 조회
-        cur.execute("""
-            SELECT min_unit_price FROM market_snapshots
-            WHERE item_name = ? ORDER BY id DESC LIMIT 1
-        """, (ing_name,))
-        p_row = cur.fetchone()
-        unit_price = p_row[0] if p_row else 100  # Fallback
+        prod_snap = fetch_latest_snapshot(cur, matched_name)
+        market_price = prod_snap[1] if prod_snap else None
 
-        cost = req_count * unit_price
-        total_mat_cost += cost
-        ing_details.append({
-            "name": ing_name,
-            "required": req_count,
-            "unit_price": unit_price,
-            "cost": cost
-        })
-
-    # 완제품 최신 판매 시세 조회
-    cur.execute("""
-        SELECT min_unit_price FROM market_snapshots
-        WHERE item_name = ? ORDER BY id DESC LIMIT 1
-    """, (matched_name,))
-    prod_row = cur.fetchone()
-    market_price = prod_row[0] if prod_row else (total_mat_cost * 1.5)
-
-    conn.close()
-
-    # 기대 수익 계산 (거래소 수수료 10% 반영)
     fee_rate = 0.10
-    p_succ = succ_rate / 100.0
-    p_crit = (succ_rate / 100.0) * (crit_rate / 100.0)
-    expected_yield = p_succ + p_crit
+    p_succ = max(0.0, min(1.0, norm_succ / 100.0))
+    p_crit = max(0.0, min(1.0, norm_crit / 100.0))
+    expected_yield = p_succ * (produced + p_crit)
+
+    if market_price is None or missing_prices:
+        if market_price is None:
+            missing_prices.append(matched_name)
+        return {
+            "recipe_name": matched_name,
+            "produced_per_craft": produced,
+            "success_rate_percent": round(norm_succ, 2),
+            "critical_rate_percent": round(norm_crit, 2),
+            "expected_yield_per_craft": round(expected_yield, 2),
+            "total_material_cost": None if missing_prices and len(missing_prices) == len(ing_details) else total_mat_cost,
+            "finished_item_market_price": market_price,
+            "expected_net_profit": None,
+            "roi_percent": None,
+            "is_profitable": None,
+            "missing_prices": sorted(set(missing_prices)),
+            "warning": "시세 미수집 품목이 있어 정확한 수익 계산이 불가능합니다.",
+            "ingredients": ing_details,
+        }
 
     expected_revenue = expected_yield * market_price * (1.0 - fee_rate)
     net_profit = expected_revenue - total_mat_cost
@@ -187,15 +214,17 @@ def tool_calculate_craft(recipe_name: str, success_override: float = None) -> di
 
     return {
         "recipe_name": matched_name,
-        "success_rate_percent": succ_rate,
-        "critical_rate_percent": crit_rate,
+        "produced_per_craft": produced,
+        "success_rate_percent": round(norm_succ, 2),
+        "critical_rate_percent": round(norm_crit, 2),
         "expected_yield_per_craft": round(expected_yield, 2),
         "total_material_cost": total_mat_cost,
         "finished_item_market_price": market_price,
         "expected_net_profit": round(net_profit),
         "roi_percent": round(roi, 1),
         "is_profitable": net_profit > 0,
-        "ingredients": ing_details
+        "missing_prices": [],
+        "ingredients": ing_details,
     }
 
 TOOLS_SPEC = [
@@ -246,9 +275,16 @@ def main():
         except Exception:
             continue
 
+        if not isinstance(req, dict):
+            continue
+
         msg_id = req.get("id")
         method = req.get("method")
-        params = req.get("params", {})
+        params = req.get("params") or {}
+
+        # JSON-RPC Notification (id가 없는 요청, 예: notifications/initialized)에는 응답을 송출하지 않음
+        if msg_id is None:
+            continue
 
         if method == "initialize":
             res = {
@@ -273,7 +309,7 @@ def main():
             }
         elif method == "tools/call":
             tool_name = params.get("name")
-            args = params.get("arguments", {})
+            args = params.get("arguments") or {}
 
             try:
                 if tool_name == "mobi_market_get_price":

@@ -15,6 +15,10 @@ fn test_equipment_slot_classification() {
     // 3. 방어구 및 무기
     assert_eq!(get_equipment_slot("잔영의 가죽 갑옷 상의ZZ"), EquipmentSlot::Armor);
     assert_eq!(get_equipment_slot("잔영의 샤프 듀얼소드ZZ"), EquipmentSlot::Weapon);
+
+    // 4. 비장비 ("허상의 마력석"이 "상의" 부분 문자열로 방어구 오분류되지 않아야 함!)
+    assert_eq!(get_equipment_slot("허상의 마력석"), EquipmentSlot::Other);
+    assert_eq!(get_equipment_slot("포식의 마력석"), EquipmentSlot::Other);
 }
 
 #[test]

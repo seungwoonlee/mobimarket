@@ -22,13 +22,14 @@ fn test_material_profit_calculation_special_silk() {
     // 루트 A: 1차 최상급 실크 4개 직구매 (45 * 4 = 180) -> 순익 216 - 180 = +36
     assert_eq!(row.primary_cost, Some(180));
     assert_eq!(row.profit_primary, Some(36));
-    assert_eq!(row.is_primary_loss, false);
+    assert!(!row.is_primary_loss);
 
     // 루트 B: 2차 상급 실크 4개로 최상급 실크 2개 산출 -> 개당 20데카
     // 최상급 실크 4개 투입 시 환산원가: 20 * 4 = 80데카
     // 순익: 216 - 80 = +136데카
     assert_eq!(row.secondary_cost, Some(80));
     assert_eq!(row.profit_secondary, Some(136));
+    assert_eq!(row.secondary_duration_secs, Some(420)); // 180 + 120 * (4/2) = 420초
     assert_eq!(row.strategy_code, 3); // 꿀벌이 (자체 가공 추천)
 }
 
@@ -52,7 +53,7 @@ fn test_material_profit_calculation_platinum_loss_warning() {
     // 루트 A: 운철괴 5개 직구매 (74 * 5 = 370) -> 순익 351 - 370 = -19 (적자!)
     assert_eq!(row.primary_cost, Some(370));
     assert_eq!(row.profit_primary, Some(-19));
-    assert_eq!(row.is_primary_loss, true);
+    assert!(row.is_primary_loss);
 
     // 루트 B: 은합금괴 5개(37*5=185)로 운철괴 3개 산출 -> 운철괴 개당 원가 61.67데카
     // 운철괴 5개 투입 시 환산원가: 61.67 * 5 = 308데카

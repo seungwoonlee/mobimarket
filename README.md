@@ -8,14 +8,14 @@
 
 <br/>
 
-[![최신 버전](https://img.shields.io/badge/Release-v1.2.0_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.2.0)
-[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.2.0/mobi_market.exe)
+[![최신 버전](https://img.shields.io/badge/Release-v1.2.4_최신버전-success?style=for-the-badge&logo=github)](https://github.com/seungwoonlee/mobimarket/releases/tag/v1.2.4)
+[![다운로드 파일](https://img.shields.io/badge/무설치-단일_실행_파일-blue?style=for-the-badge&logo=windows)](https://github.com/seungwoonlee/mobimarket/releases/download/v1.2.4/mobi_market.exe)
 [![초고속 엔진](https://img.shields.io/badge/Engine-Rust_초고속_가벼움-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![라이선스](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 <br/>
 
-<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.2.0/mobi_market.exe">
+<a href="https://github.com/seungwoonlee/mobimarket/releases/download/v1.2.4/mobi_market.exe">
   <img src="https://img.shields.io/badge/👉_지금_바로_최신버전_다운로드_(mobi__market.exe)-%23E0443E?style=for-the-badge&logo=windows&logoColor=white" height="45" alt="다운로드 버튼"/>
 </a>
 
@@ -155,7 +155,7 @@
 
 ### 시스템 요구 사항
 - OS: Windows 10 / 11 (64-bit)
-- Rust 1.75+ (직접 소스 코드를 빌드할 경우)
+- Rust 1.87+ (직접 소스 코드를 빌드할 경우)
 
 ### 로컬 빌드 방법
 ```powershell
