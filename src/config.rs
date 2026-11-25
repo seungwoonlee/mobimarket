@@ -541,3 +541,8 @@ pub fn format_signed_number(val: i64) -> String {
 pub fn normalize_search_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
 }
+
+/// 모든 유저가 기본적으로 넘치게 보유하여 구매 가치가 없는 무가치 기본 재료 판별 (원가 0데카 취급)
+pub fn is_zero_cost_material(name: &str) -> bool {
+    name.trim().trim_end_matches("ZZ") == "세공된 페리도트"
+}

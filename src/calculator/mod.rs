@@ -4,7 +4,7 @@ pub use material_profit::{MaterialProfitCalculator, MaterialProfitRow};
 
 use crate::cli::models::OwnedItem;
 use crate::cli::CraftIngredient;
-use crate::config::{format_number, MARKET_FEE_RATE};
+use crate::config::{format_number, is_zero_cost_material, MARKET_FEE_RATE};
 use crate::store::Database;
 use serde::{Deserialize, Serialize};
 
@@ -164,13 +164,18 @@ impl CraftCalculator {
             };
             let shortage = (expected_req - total_owned).max(0);
 
-            let ing_snapshot = self.db.get_latest_snapshot(&ing.display_name).await
-                .map_err(|e| format!("재료 시세 조회 실패({}): {}", ing.display_name, e))?;
+            let unit_price = if is_zero_cost_material(&ing.display_name) {
+                Some(0)
+            } else {
+                let ing_snapshot = self.db.get_latest_snapshot(&ing.display_name).await
+                    .map_err(|e| format!("재료 시세 조회 실패({}): {}", ing.display_name, e))?;
 
-            let unit_price = ing_snapshot.map(|s| s.min_unit_price);
-            if unit_price.is_none() {
-                missing_price_items.push(ing.display_name.clone());
-            }
+                let price = ing_snapshot.map(|s| s.min_unit_price);
+                if price.is_none() {
+                    missing_price_items.push(ing.display_name.clone());
+                }
+                price
+            };
 
             let ing_total_cost = unit_price.map(|p| p * expected_req);
             let ing_gap_cost = unit_price.map(|p| p * shortage);

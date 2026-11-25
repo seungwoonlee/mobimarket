@@ -1,6 +1,6 @@
 use mobi_market::calculator::CraftCalculator;
 use mobi_market::cli::models::OwnedItem;
-use mobi_market::config::{format_number, format_signed_number};
+use mobi_market::config::{format_number, format_signed_number, is_zero_cost_material};
 use mobi_market::store::Database;
 use tempfile::tempdir;
 
@@ -165,6 +165,59 @@ async fn test_craft_calculator_produced_per_craft_and_number_formatting() {
     assert_eq!(format_signed_number(-19), "-19");
     assert_eq!(format_signed_number(0), "0");
     assert_eq!(format_number(i64::MIN), "-9,223,372,036,854,775,808");
+}
+
+#[tokio::test]
+async fn test_zero_cost_peridot_treated_as_zero_deca_without_warning() {
+    assert!(is_zero_cost_material("세공된 페리도트"));
+    assert!(is_zero_cost_material("세공된 페리도트ZZ"));
+    assert!(is_zero_cost_material(" 세공된 페리도트ZZ "));
+    assert!(!is_zero_cost_material("특급 가죽"));
+
+    let dir = tempdir().unwrap();
+    let db = Database::new(&dir.path().join("test_peridot.db")).unwrap();
+
+    // 세공된 페리도트ZZ 시세가 DB에 전혀 없어도, 다른 재료 및 완제품 시세만 있으면 정상 추천되어야 함
+    let ingredients_json = serde_json::json!([
+        { "DisplayName": "세공된 페리도트ZZ", "Required": 10, "Owned": 0 },
+        { "DisplayName": "포식의 마력석", "Required": 5, "Owned": 0 }
+    ])
+    .to_string();
+    db.upsert_recipe("잔영의 페리도트 링ZZ", 1, 100.0, 0.0, &ingredients_json)
+        .await
+        .unwrap();
+    db.insert_snapshot("잔영의 페리도트 링ZZ", None, None, None, 3000, true)
+        .await
+        .unwrap();
+    db.insert_snapshot("포식의 마력석", None, None, None, 100, true)
+        .await
+        .unwrap();
+
+    let calc = CraftCalculator::new(db.clone());
+    let res = calc
+        .calculate("잔영의 페리도트 링ZZ", 1, &[], true, true, false)
+        .await
+        .unwrap();
+
+    assert!(!res.has_missing_prices);
+    assert!(res.missing_price_items.is_empty());
+    assert_eq!(res.ingredients[0].unit_min_price, Some(0));
+    assert_eq!(res.ingredients[0].total_cost, Some(0));
+    assert_eq!(res.ingredients[0].gap_cost, Some(0));
+    assert_eq!(res.total_material_cost, 500);
+    assert_eq!(res.saving_amount, Some(2500));
+    assert!(res.recommendation.contains("직접 제작 강력 추천"));
+
+    // DB에 임의 고가 스냅샷(9999 데카)이 들어가더라도 원가 계산은 항상 0데카로 고정
+    db.insert_snapshot("세공된 페리도트ZZ", None, None, None, 9999, true)
+        .await
+        .unwrap();
+    let res_with_snapshot = calc
+        .calculate("잔영의 페리도트 링ZZ", 1, &[], true, true, false)
+        .await
+        .unwrap();
+    assert_eq!(res_with_snapshot.ingredients[0].unit_min_price, Some(0));
+    assert_eq!(res_with_snapshot.total_material_cost, 500);
 }
 
 

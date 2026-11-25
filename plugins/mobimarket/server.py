@@ -48,6 +48,13 @@ def get_zz_variants(name: str) -> list[str]:
         return [name, name[:-2]]
     return [name, name + "ZZ"]
 
+def is_zero_cost_material(name: str) -> bool:
+    """기본적으로 모든 유저가 넘치게 보유하여 구매 가치가 없는 재료 판별 (원가 0데카 취급)"""
+    trimmed = name.strip()
+    while trimmed.endswith("ZZ"):
+        trimmed = trimmed[:-2]
+    return trimmed == "세공된 페리도트"
+
 def fetch_latest_snapshot(cur, item_name: str):
     variants = get_zz_variants(item_name)
     placeholders = ",".join("?" for _ in variants)
@@ -164,15 +171,19 @@ def tool_calculate_craft(recipe_name: str, success_override: float = None) -> di
         for ing in ingredients:
             ing_name = ing.get("DisplayName", "")
             req_count = int(ing.get("Required", 1))
-            snap = fetch_latest_snapshot(cur, ing_name)
-            unit_price = snap[1] if snap else None
-
-            if unit_price is None:
-                missing_prices.append(ing_name)
-                cost = None
+            if is_zero_cost_material(ing_name):
+                unit_price = 0
+                cost = 0
             else:
-                cost = req_count * unit_price
-                total_mat_cost += cost
+                snap = fetch_latest_snapshot(cur, ing_name)
+                unit_price = snap[1] if snap else None
+
+                if unit_price is None:
+                    missing_prices.append(ing_name)
+                    cost = None
+                else:
+                    cost = req_count * unit_price
+                    total_mat_cost += cost
 
             ing_details.append({
                 "name": ing_name,
