@@ -1,4 +1,6 @@
-use crate::calculator::{CraftCalculationResult, CraftCalculator, MaterialProfitCalculator};
+use crate::calculator::{
+    AllRecipeComparisonRow, CraftCalculationResult, CraftCalculator, MaterialProfitCalculator,
+};
 use crate::cli::models::{MarketRow, OwnedItem};
 use crate::cli::CliClient;
 use crate::collector::Collector;
@@ -14,6 +16,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CraftViewMode {
+    SingleDetail,
+    AllItemsCompare,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AllCraftSortMode {
+    BuyAdvantage,   // 재료 팔아 완제품 구매 유리순
+    CraftAdvantage, // 보유 재료 직접 제작 유리순
+    SellSurplus,    // 매각 잉여금순
+}
 
 struct RefreshPayload {
     cli_connected: bool,
@@ -38,6 +53,10 @@ enum AppAsyncEvent {
     CalcCompleted {
         seq: u64,
         result: Option<CraftCalculationResult>,
+    },
+    AllCalcCompleted {
+        seq: u64,
+        rows: Vec<AllRecipeComparisonRow>,
     },
     MonitoredMutated {
         select_item: Option<String>,
@@ -124,6 +143,11 @@ pub struct MobiMarketApp {
     search_error_msg: Option<String>,
 
     // [제작 계산기 탭 상태]
+    craft_view_mode: CraftViewMode,
+    all_craft_sort_mode: AllCraftSortMode,
+    all_recipes_comparison: Vec<AllRecipeComparisonRow>,
+    all_compare_seq: u64,
+    is_calculating_all: bool,
     job_only_filter: bool,
     craft_grade_filter: String, // "전체", "해연", "잔영"
     craft_slot_filter: Option<EquipmentSlot>, // None(전체), Weapon(무기), Armor(방어구), Accessory(장신구)
@@ -199,6 +223,11 @@ impl MobiMarketApp {
             market_search_results: Vec::new(),
             is_searching_market: false,
             search_error_msg: None,
+            craft_view_mode: CraftViewMode::SingleDetail,
+            all_craft_sort_mode: AllCraftSortMode::BuyAdvantage,
+            all_recipes_comparison: Vec::new(),
+            all_compare_seq: 0,
+            is_calculating_all: false,
             job_only_filter: true,
             craft_grade_filter: "전체".to_string(),
             craft_slot_filter: None,
@@ -331,6 +360,7 @@ impl MobiMarketApp {
                     }
 
                     self.recalculate_cost();
+                    self.recalculate_all_recipes();
                 }
                 AppAsyncEvent::SearchCompleted { seq, keyword, rows } => {
                     if seq != self.search_seq {
@@ -348,6 +378,12 @@ impl MobiMarketApp {
                 AppAsyncEvent::CalcCompleted { seq, result } => {
                     if seq == self.calc_seq {
                         self.cost_calculation = result;
+                    }
+                }
+                AppAsyncEvent::AllCalcCompleted { seq, rows } => {
+                    if seq == self.all_compare_seq {
+                        self.is_calculating_all = false;
+                        self.all_recipes_comparison = rows;
                     }
                 }
                 AppAsyncEvent::MonitoredMutated { select_item } => {
@@ -616,6 +652,46 @@ impl MobiMarketApp {
                 .await
                 .ok();
             let _ = tx.send(AppAsyncEvent::CalcCompleted { seq, result: res });
+            ctx.request_repaint();
+        });
+    }
+
+    /// 전품목(전체 레시피) 보유 재료 매각(90%) vs 직접 제작 기회비용 비동기 일괄 계산
+    fn recalculate_all_recipes(&mut self) {
+        if self.all_recipes.is_empty() {
+            self.is_calculating_all = false;
+            self.all_recipes_comparison.clear();
+            return;
+        }
+
+        self.all_compare_seq = self.all_compare_seq.wrapping_add(1);
+        let seq = self.all_compare_seq;
+        self.is_calculating_all = true;
+
+        let db = self.db.clone();
+        let recipes = self.all_recipes.clone();
+        let qty = (self.craft_quantity as i64).max(1);
+        let owned_items = self.owned_items_cache.clone();
+        let has_live_inventory = self.cli_connected;
+        let consider_success = self.craft_consider_success;
+        let consider_critical = self.craft_consider_critical;
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+
+        tokio::spawn(async move {
+            let calc = CraftCalculator::new(db);
+            let rows = calc
+                .evaluate_all_recipes(
+                    &recipes,
+                    qty,
+                    &owned_items,
+                    has_live_inventory,
+                    consider_success,
+                    consider_critical,
+                )
+                .await
+                .unwrap_or_default();
+            let _ = tx.send(AppAsyncEvent::AllCalcCompleted { seq, rows });
             ctx.request_repaint();
         });
     }
@@ -1787,8 +1863,63 @@ impl MobiMarketApp {
         });
     }
 
-    /// 탭 2: 제작 아이템 계산기 뷰
+    /// 탭 2: 제작 아이템 계산기 뷰 (단일 상세 vs 전품목 기회비용 일괄 비교)
     fn view_craft_calculator(&mut self, ui: &mut egui::Ui) {
+        // 상단 뷰 모드 전환 & 재고 기준 안내 바
+        ui.horizontal(|ui| {
+            let is_single = self.craft_view_mode == CraftViewMode::SingleDetail;
+            if ui
+                .selectable_label(
+                    is_single,
+                    RichText::new(" 🔍 단일 레시피 상세 ").size(13.0).strong(),
+                )
+                .clicked()
+            {
+                self.craft_view_mode = CraftViewMode::SingleDetail;
+            }
+
+            let is_all = self.craft_view_mode == CraftViewMode::AllItemsCompare;
+            if ui
+                .selectable_label(
+                    is_all,
+                    RichText::new(" 📊 전품목 매각·제작 기회비용 일괄 비교 ")
+                        .size(13.0)
+                        .strong()
+                        .color(if is_all {
+                            Color32::from_rgb(255, 215, 80)
+                        } else {
+                            Color32::from_rgb(130, 210, 255)
+                        }),
+                )
+                .clicked()
+            {
+                self.craft_view_mode = CraftViewMode::AllItemsCompare;
+                self.recalculate_all_recipes();
+            }
+
+            ui.separator();
+
+            if self.cli_connected {
+                ui.label(
+                    RichText::new("● 실시간 인벤토리 연동 중 (거래소 수수료 10% 기준)")
+                        .size(11.5)
+                        .color(Color32::from_rgb(110, 230, 140)),
+                );
+            } else {
+                ui.label(
+                    RichText::new("※ 게임 미연동 — 과거 동기화 재고 기준 (수수료 10% 공제)")
+                        .size(11.5)
+                        .color(Color32::from_rgb(250, 190, 80)),
+                );
+            }
+        });
+        ui.separator();
+
+        if self.craft_view_mode == CraftViewMode::AllItemsCompare {
+            self.view_craft_all_items_compare(ui);
+            return;
+        }
+
         let total_height = ui.available_height();
 
         ui.horizontal(|ui| {
@@ -1810,7 +1941,7 @@ impl MobiMarketApp {
 
                 ui.add_space(4.0);
 
-                // 2. 분류 필터 ([전체], [해연], [잔영] - 사용자 요청: '등급'이 아닌 '분류'로 변경)
+                // 2. 분류 필터 ([전체], [해연], [잔영])
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("분류:").size(11.0).color(Color32::GRAY));
                     for cat in &["전체", "해연", "잔영"] {
@@ -1914,7 +2045,7 @@ impl MobiMarketApp {
                         .color(Color32::LIGHT_BLUE),
                 );
 
-                let left_recipe_height = (total_height - 180.0).max(450.0);
+                let left_recipe_height = (total_height - 180.0).max(420.0);
                 egui::ScrollArea::vertical()
                     .id_salt("craft_recipes_list_scroll")
                     .drag_to_scroll(false)
@@ -1963,7 +2094,6 @@ impl MobiMarketApp {
                                 .color(Color32::WHITE),
                         );
 
-                        // 사용자 요청 버그 수정: 10000% 또는 9000%, 1200% 표기 문제 완전 정규화
                         ui.label(
                             RichText::new(format!(
                                 "(성공률: {}% / 대성공: {}%)",
@@ -1974,7 +2104,6 @@ impl MobiMarketApp {
                         );
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // 대성공 감안 체크박스 (기본 OFF)
                             if ui
                                 .checkbox(
                                     &mut self.craft_consider_critical,
@@ -1984,11 +2113,11 @@ impl MobiMarketApp {
                                 .changed()
                             {
                                 self.recalculate_cost();
+                                self.recalculate_all_recipes();
                             }
 
                             ui.add_space(8.0);
 
-                            // 성공률 감안 체크박스 (기본 ON)
                             if ui
                                 .checkbox(
                                     &mut self.craft_consider_success,
@@ -1998,6 +2127,7 @@ impl MobiMarketApp {
                                 .changed()
                             {
                                 self.recalculate_cost();
+                                self.recalculate_all_recipes();
                             }
 
                             ui.add_space(12.0);
@@ -2005,6 +2135,7 @@ impl MobiMarketApp {
                             if ui.button(" + ").clicked() {
                                 self.craft_quantity = (self.craft_quantity + 1).min(99);
                                 self.recalculate_cost();
+                                self.recalculate_all_recipes();
                             }
                             ui.label(
                                 RichText::new(format!("{} 회", self.craft_quantity))
@@ -2014,6 +2145,7 @@ impl MobiMarketApp {
                             if ui.button(" - ").clicked() {
                                 self.craft_quantity = (self.craft_quantity - 1).max(1);
                                 self.recalculate_cost();
+                                self.recalculate_all_recipes();
                             }
                             ui.label("제작 횟수:");
                         });
@@ -2021,7 +2153,7 @@ impl MobiMarketApp {
 
                     ui.add_space(8.0);
 
-                    // 3단 가격 비교 카드 그리드
+                    // 4단 가격 및 매각 기회비용 비교 카드 그리드
                     if let Some(calc) = &self.cost_calculation {
                         let finished_str = if let Some(fp) = calc.product_total_market_price {
                             format!("{} 데카", format_number(fp))
@@ -2032,89 +2164,163 @@ impl MobiMarketApp {
                         let full_craft_str = format!("{} 데카", format_number(calc.total_material_cost));
                         let actual_craft_str = format!("{} 데카", format_number(calc.user_inventory_gap_cost));
 
-                        let b_sub_text = if calc.consider_success && calc.consider_critical {
-                            format!("성공률 {}% + 대성공 {}% 감안 (평균 {:.2}회 시도)", norm_succ as i32, norm_crit as i32, calc.expected_attempts)
-                        } else if calc.consider_success {
-                            format!("성공률 {}% 감안 (평균 {:.2}회 시도)", norm_succ as i32, calc.expected_attempts)
-                        } else if calc.consider_critical {
-                            format!("대성공 {}% 감안 (평균 {:.2}회 시도)", norm_crit as i32, calc.expected_attempts)
+                        let (sell_buy_str, sell_buy_color, d_sub_text) = if let Some(net_buy) = calc.buy_after_selling_net_cost {
+                            if net_buy <= 0 {
+                                (
+                                    format!("+{} 데카 남음!", format_number(-net_buy)),
+                                    Color32::from_rgb(100, 235, 255),
+                                    format!("투입분 매각(90%): {} 데카", format_number(calc.owned_materials_sell_net)),
+                                )
+                            } else {
+                                (
+                                    format!("{} 데카", format_number(net_buy)),
+                                    Color32::from_rgb(130, 200, 255),
+                                    format!("투입분 매각(90%): {} 데카 차감", format_number(calc.owned_materials_sell_net)),
+                                )
+                            }
                         } else {
-                            "100% 성공 기준 (기본 1회 원가)".to_string()
+                            (
+                                "-".to_string(),
+                                Color32::GRAY,
+                                format!("투입분 매각(90%): {} 데카", format_number(calc.owned_materials_sell_net)),
+                            )
+                        };
+
+                        let b_sub_text = if calc.consider_success && calc.consider_critical {
+                            format!("성공 {}% + 대성공 {}% ({:.2}회)", norm_succ as i32, norm_crit as i32, calc.expected_attempts)
+                        } else if calc.consider_success {
+                            format!("성공률 {}% 감안 ({:.2}회)", norm_succ as i32, calc.expected_attempts)
+                        } else if calc.consider_critical {
+                            format!("대성공 {}% 감안 ({:.2}회)", norm_crit as i32, calc.expected_attempts)
+                        } else {
+                            "100% 성공 기준 (1회 원가)".to_string()
                         };
 
                         let c_sub_text = if calc.consider_success || calc.consider_critical {
-                            "가방+내창고+공용창고 차감 + 기대값 반영"
+                            "직접 제작 시 추가 현금 지출"
                         } else {
-                            "가방+내창고+공용창고 차감 후"
+                            "보유분 차감 후 추가 현금 지출"
                         };
 
-                        ui.columns(3, |cols| {
+                        ui.columns(4, |cols| {
                             cols[0].group(|ui| {
-                                ui.label(RichText::new("A. 완제품 마켓 최저가").size(12.0).color(Color32::GRAY));
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new("A. 완제품 마켓 최저가").size(11.5).color(Color32::GRAY));
                                 ui.label(
                                     RichText::new(finished_str)
-                                        .size(18.0)
+                                        .size(16.5)
                                         .strong()
                                         .color(Color32::LIGHT_BLUE),
                                 );
-                                ui.label(RichText::new("마켓 완제품 즉시 구매 시").size(11.0).color(Color32::DARK_GRAY));
+                                ui.label(RichText::new("완제품 즉시 구매가").size(10.5).color(Color32::DARK_GRAY));
                             });
 
                             cols[1].group(|ui| {
-                                ui.label(RichText::new("B. 재료 전량 구매 제작비").size(12.0).color(Color32::GRAY));
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new("B. 전량 구매 제작비").size(11.5).color(Color32::GRAY));
                                 ui.label(
                                     RichText::new(full_craft_str)
-                                        .size(18.0)
+                                        .size(16.5)
                                         .strong()
                                         .color(Color32::from_rgb(250, 190, 60)),
                                 );
-                                ui.label(RichText::new(b_sub_text).size(11.0).color(Color32::DARK_GRAY));
+                                ui.label(RichText::new(b_sub_text).size(10.5).color(Color32::DARK_GRAY));
                             });
 
                             cols[2].group(|ui| {
-                                ui.label(RichText::new("C. 보유 재고 차감 실구매액").size(12.0).color(Color32::GRAY));
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new("C. 부족분 실구매액 (제작)").size(11.5).color(Color32::GRAY));
                                 ui.label(
                                     RichText::new(actual_craft_str)
-                                        .size(18.0)
+                                        .size(16.5)
                                         .strong()
                                         .color(Color32::from_rgb(110, 230, 140)),
                                 );
-                                ui.label(RichText::new(c_sub_text).size(11.0).color(Color32::DARK_GRAY));
+                                ui.label(RichText::new(c_sub_text).size(10.5).color(Color32::DARK_GRAY));
+                            });
+
+                            cols[3].group(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new("D. 재료매각(90%) 후 구매").size(11.5).color(Color32::GRAY));
+                                ui.label(
+                                    RichText::new(sell_buy_str)
+                                        .size(16.5)
+                                        .strong()
+                                        .color(sell_buy_color),
+                                );
+                                ui.label(RichText::new(d_sub_text).size(10.5).color(Color32::DARK_GRAY));
                             });
                         });
 
                         ui.add_space(8.0);
 
-                        // 추천 판정 배너 (시세 누락 시 추천 차단)
+                        // 기회비용 반영 추천 판정 배너 (제작 유리=초록 / 매각후구매 유리=스카이블루 / 시세미수집·불가=빨강)
                         let verdict_text = &calc.recommendation;
-                        let is_craft_recommended = !calc.has_missing_prices && calc.saving_amount.unwrap_or(0) > 0;
-                        let banner_bg = if is_craft_recommended {
-                            Color32::from_rgb(25, 55, 35)
+                        let (tag, tag_color, banner_bg, banner_stroke) = if calc.has_missing_prices || calc.craft_advantage_over_sell_buy.is_none() {
+                            (
+                                "[주의]",
+                                Color32::YELLOW,
+                                Color32::from_rgb(55, 30, 30),
+                                Color32::from_rgb(130, 70, 70),
+                            )
                         } else {
-                            Color32::from_rgb(55, 30, 30)
+                            let adv = calc.craft_advantage_over_sell_buy.unwrap_or(0);
+                            if adv > 0 {
+                                (
+                                    "[제작 추천]",
+                                    Color32::from_rgb(110, 240, 130),
+                                    Color32::from_rgb(22, 55, 34),
+                                    Color32::from_rgb(70, 130, 90),
+                                )
+                            } else if adv < 0 {
+                                (
+                                    "[매각·구매 추천]",
+                                    Color32::from_rgb(110, 220, 255),
+                                    Color32::from_rgb(20, 44, 68),
+                                    Color32::from_rgb(70, 120, 170),
+                                )
+                            } else {
+                                (
+                                    "[동일]",
+                                    Color32::LIGHT_GRAY,
+                                    Color32::from_rgb(40, 44, 52),
+                                    Color32::from_rgb(80, 90, 105),
+                                )
+                            }
                         };
 
                         egui::Frame::none()
                             .fill(banner_bg)
-                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(80, 120, 90)))
+                            .stroke(Stroke::new(1.0_f32, banner_stroke))
                             .inner_margin(egui::Margin::symmetric(14.0, 8.0))
                             .rounding(6.0)
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let tag = if is_craft_recommended { "[추천]" } else { "[주의]" };
-                                    ui.label(
-                                        RichText::new(tag)
-                                            .size(14.0)
-                                            .strong()
-                                            .color(if is_craft_recommended { Color32::GREEN } else { Color32::YELLOW }),
-                                    );
-                                    ui.label(
-                                        RichText::new(verdict_text)
-                                            .size(14.0)
-                                            .strong()
-                                            .color(Color32::WHITE),
-                                    );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(tag).size(14.0).strong().color(tag_color));
+                                    ui.label(RichText::new(verdict_text).size(13.5).strong().color(Color32::WHITE));
                                 });
+
+                                if calc.can_buy_with_used_owned || calc.can_buy_with_all_owned {
+                                    ui.add_space(4.0);
+                                    let buy_badge = if calc.can_buy_with_used_owned {
+                                        format!(
+                                            "💰 보유 재료(제작 투입분)만 팔아도(수수료 10% 후 {} 데카) 완제품 즉시 구매 가능!",
+                                            format_number(calc.owned_materials_sell_net)
+                                        )
+                                    } else {
+                                        format!(
+                                            "💰 이 레시피의 보유 재료 전량 매각 시(수수료 10% 후 {} 데카) 완제품 구매 가능 (투입분 기준 {} 데카)",
+                                            format_number(calc.all_owned_materials_sell_net),
+                                            format_number(calc.owned_materials_sell_net)
+                                        )
+                                    };
+                                    ui.label(
+                                        RichText::new(buy_badge)
+                                            .size(12.0)
+                                            .strong()
+                                            .color(Color32::from_rgb(255, 215, 80)),
+                                    );
+                                }
                             });
 
                         ui.add_space(10.0);
@@ -2123,18 +2329,18 @@ impl MobiMarketApp {
                         // 필수 재료 상세 명세 테이블
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("필수 재료 최저가 및 소요비용 산출 명세")
+                                RichText::new("필수 재료 최저가 및 매각(90%) 기회비용 명세")
                                     .size(14.0)
                                     .strong(),
                             );
                             ui.label(
-                                RichText::new("(보유량: 내가방 + 내창고 + 공용창고 실시간 합산)")
+                                RichText::new("(보유량: 내가방 + 내창고 + 공용창고 합산, 잠금 제외)")
                                     .size(11.0)
                                     .color(Color32::from_rgb(100, 200, 255)),
                             );
                         });
 
-                        let table_height = (total_height - 250.0).max(350.0);
+                        let table_height = (total_height - 270.0).max(320.0);
                         egui::ScrollArea::vertical()
                             .id_salt("craft_materials_table_scroll")
                             .drag_to_scroll(false)
@@ -2144,14 +2350,15 @@ impl MobiMarketApp {
                             .show(ui, |ui| {
                                 egui::Grid::new("craft_ingredients_grid")
                                     .striped(true)
-                                    .min_col_width(90.0)
+                                    .min_col_width(82.0)
                                     .show(ui, |ui| {
                                         ui.label(RichText::new("재료명").strong().color(Color32::GRAY));
                                         ui.label(RichText::new("필요 수량").strong().color(Color32::GRAY));
-                                        ui.label(RichText::new("총 보유량 (가방+창고)").strong().color(Color32::GRAY));
+                                        ui.label(RichText::new("보유량").strong().color(Color32::GRAY));
                                         ui.label(RichText::new("부족 수량").strong().color(Color32::GRAY));
-                                        ui.label(RichText::new("최저가 (단가)").strong().color(Color32::GRAY));
-                                        ui.label(RichText::new("총 소요비용").strong().color(Color32::GRAY));
+                                        ui.label(RichText::new("최저가(단가)").strong().color(Color32::GRAY));
+                                        ui.label(RichText::new("부족분 구매비").strong().color(Color32::GRAY));
+                                        ui.label(RichText::new("보유분 매각(90%)").strong().color(Color32::from_rgb(120, 210, 255)));
                                         ui.end_row();
 
                                         for ing in &calc.ingredients {
@@ -2163,6 +2370,12 @@ impl MobiMarketApp {
 
                                             let cost_str = if let Some(c) = ing.gap_cost {
                                                 format!("{} 데카", format_number(c))
+                                            } else {
+                                                "-".to_string()
+                                            };
+
+                                            let sell_net_str = if let Some(sn) = ing.owned_sell_net {
+                                                format!("{} 데카", format_number(sn))
                                             } else {
                                                 "-".to_string()
                                             };
@@ -2181,8 +2394,8 @@ impl MobiMarketApp {
                                                     .strong(),
                                             );
                                             owned_label.on_hover_text(format!(
-                                                "내가방: {}개\n내창고: {}개\n공용창고: {}개",
-                                                ing.bag_count, ing.char_storage_count, ing.account_storage_count
+                                                "내가방: {}개\n내창고: {}개\n공용창고: {}개\n(이번 제작 투입분: {}개)",
+                                                ing.bag_count, ing.char_storage_count, ing.account_storage_count, ing.used_owned_count
                                             ));
 
                                             let shortage_str = format!("{}개", ing.shortage_count);
@@ -2200,6 +2413,15 @@ impl MobiMarketApp {
                                                     .strong()
                                                     .color(Color32::from_rgb(255, 200, 80)),
                                             );
+                                            ui.label(
+                                                RichText::new(sell_net_str)
+                                                    .strong()
+                                                    .color(Color32::from_rgb(120, 210, 255)),
+                                            ).on_hover_text(format!(
+                                                "투입 보유분 {}개 매각 시 총액 {} 데카 (수수료 10% 공제 후 실수령)",
+                                                ing.used_owned_count,
+                                                ing.owned_sell_gross.map_or_else(|| "-".to_string(), format_number)
+                                            ));
                                             ui.end_row();
                                         }
                                     });
@@ -2210,6 +2432,301 @@ impl MobiMarketApp {
                 }
             });
         });
+    }
+
+    /// [제작] 탭 서브뷰: 전품목 보유 재료 매각(90%) vs 직접 제작 기회비용 일괄 비교
+    fn view_craft_all_items_compare(&mut self, ui: &mut egui::Ui) {
+        // 1. 상단 가로 통합 필터 & 옵션 바
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(
+                &mut self.job_only_filter,
+                RichText::new(format!("내 직업({})", self.job_name))
+                    .color(Color32::from_rgb(130, 220, 150))
+                    .strong(),
+            );
+            ui.separator();
+
+            ui.label(RichText::new("분류:").size(11.0).color(Color32::GRAY));
+            for cat in &["전체", "해연", "잔영"] {
+                if ui.selectable_label(self.craft_grade_filter == *cat, *cat).clicked() {
+                    self.craft_grade_filter = cat.to_string();
+                }
+            }
+            ui.separator();
+
+            ui.label(RichText::new("부위:").size(11.0).color(Color32::GRAY));
+            if ui.selectable_label(self.craft_slot_filter.is_none(), "전체").clicked() {
+                self.craft_slot_filter = None;
+            }
+            if ui.selectable_label(self.craft_slot_filter == Some(EquipmentSlot::Weapon), "무기").clicked() {
+                self.craft_slot_filter = Some(EquipmentSlot::Weapon);
+            }
+            if ui.selectable_label(self.craft_slot_filter == Some(EquipmentSlot::Armor), "방어구").clicked() {
+                self.craft_slot_filter = Some(EquipmentSlot::Armor);
+            }
+            if ui.selectable_label(self.craft_slot_filter == Some(EquipmentSlot::Accessory), "장신구").clicked() {
+                self.craft_slot_filter = Some(EquipmentSlot::Accessory);
+            }
+            ui.separator();
+
+            ui.label("검색:");
+            ui.add(egui::TextEdit::singleline(&mut self.craft_search_query).desired_width(120.0));
+            ui.separator();
+
+            if ui.button(" - ").clicked() {
+                self.craft_quantity = (self.craft_quantity - 1).max(1);
+                self.recalculate_cost();
+                self.recalculate_all_recipes();
+            }
+            ui.label(RichText::new(format!("{}회", self.craft_quantity)).strong());
+            if ui.button(" + ").clicked() {
+                self.craft_quantity = (self.craft_quantity + 1).min(99);
+                self.recalculate_cost();
+                self.recalculate_all_recipes();
+            }
+
+            if ui.checkbox(&mut self.craft_consider_success, "성공률").changed() {
+                self.recalculate_cost();
+                self.recalculate_all_recipes();
+            }
+            if ui.checkbox(&mut self.craft_consider_critical, "대성공").changed() {
+                self.recalculate_cost();
+                self.recalculate_all_recipes();
+            }
+        });
+
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("정렬:").strong().color(Color32::LIGHT_GRAY));
+            let sort_opts = [
+                (AllCraftSortMode::BuyAdvantage, "🛒 매각 후 완제품 구매 유리순"),
+                (AllCraftSortMode::CraftAdvantage, "🔨 보유재료 직접 제작 유리순"),
+                (AllCraftSortMode::SellSurplus, "💰 매각 잉여금순"),
+            ];
+            for (mode, label) in sort_opts {
+                let active = self.all_craft_sort_mode == mode;
+                if ui
+                    .selectable_label(
+                        active,
+                        RichText::new(label).color(if active { Color32::from_rgb(255, 215, 0) } else { Color32::GRAY }),
+                    )
+                    .clicked()
+                {
+                    self.all_craft_sort_mode = mode;
+                }
+            }
+
+            if self.is_calculating_all {
+                ui.label(RichText::new("계산 중...").size(11.0).color(Color32::YELLOW));
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // 2. 필터링 & 정렬 (시세 미수집/매물 없음은 항상 최하단 고정)
+        let query = self.craft_search_query.trim().to_lowercase();
+        let job_filter = self.job_only_filter;
+        let current_job = self.job_name.clone();
+        let grade_filter = self.craft_grade_filter.clone();
+        let slot_filter = self.craft_slot_filter;
+
+        let mut rows: Vec<AllRecipeComparisonRow> = self
+            .all_recipes_comparison
+            .iter()
+            .filter(|r| {
+                if job_filter && !is_job_equipment(&current_job, &r.display_name) {
+                    return false;
+                }
+                if grade_filter != "전체" && !r.display_name.contains(&grade_filter) {
+                    return false;
+                }
+                if let Some(target_slot) = slot_filter {
+                    if get_equipment_slot(&r.display_name) != target_slot {
+                        return false;
+                    }
+                }
+                if !query.is_empty() && !r.display_name.to_lowercase().contains(&query) {
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        rows.sort_by(|a, b| {
+            let a_valid = !a.has_missing_prices && a.craft_advantage_over_sell_buy.is_some();
+            let b_valid = !b.has_missing_prices && b.craft_advantage_over_sell_buy.is_some();
+            if a_valid != b_valid {
+                return b_valid.cmp(&a_valid); // 유효 항목 우선, None/미수집은 항상 최하단
+            }
+            match self.all_craft_sort_mode {
+                AllCraftSortMode::BuyAdvantage => {
+                    // advantage가 더 음수일수록(매각 후 구매 이득이 클수록) 먼저
+                    let va = a.craft_advantage_over_sell_buy.unwrap_or(i64::MAX);
+                    let vb = b.craft_advantage_over_sell_buy.unwrap_or(i64::MAX);
+                    va.cmp(&vb).then_with(|| a.display_name.cmp(&b.display_name))
+                }
+                AllCraftSortMode::CraftAdvantage => {
+                    let va = a.craft_advantage_over_sell_buy.unwrap_or(i64::MIN);
+                    let vb = b.craft_advantage_over_sell_buy.unwrap_or(i64::MIN);
+                    vb.cmp(&va).then_with(|| a.display_name.cmp(&b.display_name))
+                }
+                AllCraftSortMode::SellSurplus => {
+                    let va = a.owned_sell_surplus.unwrap_or(i64::MIN);
+                    let vb = b.owned_sell_surplus.unwrap_or(i64::MIN);
+                    vb.cmp(&va).then_with(|| a.display_name.cmp(&b.display_name))
+                }
+            }
+        });
+
+        // 3. 상단 3대 요약 KPI 카드
+        let can_buy_used_count = rows.iter().filter(|r| r.can_buy_with_used_owned).count();
+        let can_buy_all_count = rows.iter().filter(|r| r.can_buy_with_all_owned).count();
+        let buy_better_count = rows.iter().filter(|r| r.status_code == 2 || r.status_code == 3).count();
+        let craft_better_count = rows.iter().filter(|r| r.status_code == 1).count();
+        let top_surplus = rows
+            .iter()
+            .filter(|r| r.can_buy_with_used_owned)
+            .max_by_key(|r| r.owned_sell_surplus.unwrap_or(i64::MIN));
+
+        ui.columns(3, |cols| {
+            cols[0].group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("💰 보유재료 매각만으로 구매 가능").size(12.0).color(Color32::from_rgb(255, 215, 80)));
+                ui.label(
+                    RichText::new(format!("{}개 (전량 매각 시 {}개)", can_buy_used_count, can_buy_all_count))
+                        .size(16.0)
+                        .strong()
+                        .color(Color32::WHITE),
+                );
+                if let Some(top) = top_surplus {
+                    ui.label(
+                        RichText::new(format!("최대 잉여: {} (+{} 데카)", top.display_name, format_number(top.owned_sell_surplus.unwrap_or(0))))
+                            .size(10.5)
+                            .color(Color32::from_rgb(110, 230, 140)),
+                    );
+                } else {
+                    ui.label(RichText::new("투입 보유 재료 90% 매각액 >= 완제품가").size(10.5).color(Color32::GRAY));
+                }
+            });
+
+            cols[1].group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("🛒 재료 매각 후 완제품 구매 유리").size(12.0).color(Color32::from_rgb(110, 220, 255)));
+                ui.label(
+                    RichText::new(format!("{}개 품목", buy_better_count))
+                        .size(16.0)
+                        .strong()
+                        .color(Color32::from_rgb(110, 220, 255)),
+                );
+                ui.label(RichText::new("재료를 90%에 팔고 완제품을 사는 게 더 저렴").size(10.5).color(Color32::GRAY));
+            });
+
+            cols[2].group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("🔨 보유재료로 직접 제작 유리").size(12.0).color(Color32::from_rgb(110, 235, 140)));
+                ui.label(
+                    RichText::new(format!("{}개 품목", craft_better_count))
+                        .size(16.0)
+                        .strong()
+                        .color(Color32::from_rgb(110, 235, 140)),
+                );
+                ui.label(RichText::new("수수료 10% 감안 시 보유재료로 직접 제작 추천").size(10.5).color(Color32::GRAY));
+            });
+        });
+
+        ui.add_space(8.0);
+
+        // 4. 전품목 비교 테이블
+        let mut jump_to_recipe: Option<String> = None;
+        let table_height = (ui.available_height() - 12.0).max(320.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("craft_all_compare_scroll")
+            .drag_to_scroll(false)
+            .auto_shrink([false, false])
+            .min_scrolled_height(table_height)
+            .max_height(table_height)
+            .show(ui, |ui| {
+                egui::Grid::new("craft_all_compare_grid")
+                    .striped(true)
+                    .min_col_width(80.0)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("품목명 (클릭 상세)").strong().color(Color32::LIGHT_GRAY));
+                        ui.label(RichText::new("완제품 최저가").strong().color(Color32::LIGHT_BLUE));
+                        ui.label(RichText::new("투입재료 매각(90%)").strong().color(Color32::from_rgb(120, 210, 255)));
+                        ui.label(RichText::new("부족분 구매비").strong().color(Color32::from_rgb(250, 190, 60)));
+                        ui.label(RichText::new("매각후 구매 순부담").strong().color(Color32::WHITE));
+                        ui.label(RichText::new("매각만으로 구매?").strong().color(Color32::from_rgb(255, 215, 80)));
+                        ui.label(RichText::new("추천 & 실질 차액").strong().color(Color32::WHITE));
+                        ui.end_row();
+
+                        for row in &rows {
+                            if ui.selectable_label(false, RichText::new(&row.display_name).strong()).clicked() {
+                                jump_to_recipe = Some(row.display_name.clone());
+                            }
+
+                            let prod_str = row.product_total_market_price.map_or_else(|| "매물없음".to_string(), |p| format!("{} 데카", format_number(p)));
+                            ui.label(RichText::new(prod_str).color(Color32::LIGHT_BLUE));
+
+                            ui.label(
+                                RichText::new(format!("{} 데카", format_number(row.owned_materials_sell_net)))
+                                    .color(Color32::from_rgb(120, 210, 255)),
+                            ).on_hover_text(format!("보유 재고 전량 매각 시: {} 데카", format_number(row.all_owned_materials_sell_net)));
+
+                            ui.label(
+                                RichText::new(format!("{} 데카", format_number(row.user_inventory_gap_cost)))
+                                    .color(Color32::from_rgb(250, 190, 60)),
+                            );
+
+                            let net_buy_str = match row.buy_after_selling_net_cost {
+                                Some(nb) if nb <= 0 => format!("+{} 남음", format_number(-nb)),
+                                Some(nb) => format!("{} 데카", format_number(nb)),
+                                None => "-".to_string(),
+                            };
+                            ui.label(net_buy_str);
+
+                            let buyable_label = if row.can_buy_with_used_owned {
+                                RichText::new("✅ 투입분만 가능").color(Color32::from_rgb(255, 215, 0)).strong()
+                            } else if row.can_buy_with_all_owned {
+                                RichText::new("⭕ 전량 매각 시 가능").color(Color32::from_rgb(130, 220, 255))
+                            } else {
+                                RichText::new("불가").color(Color32::GRAY)
+                            };
+                            ui.label(buyable_label);
+
+                            let rec_label = if row.has_missing_prices || row.craft_advantage_over_sell_buy.is_none() {
+                                RichText::new("⚪ 시세 미수집/매물없음").color(Color32::GRAY)
+                            } else {
+                                let adv = row.craft_advantage_over_sell_buy.unwrap_or(0);
+                                if adv > 0 {
+                                    RichText::new(format!("🔨 직접 제작 (+{} 데카 유리)", format_number(adv)))
+                                        .color(Color32::from_rgb(110, 235, 140))
+                                        .strong()
+                                } else if adv < 0 {
+                                    RichText::new(format!("🛒 매각·구매 ({} 데카 저렴)", format_number(-adv)))
+                                        .color(Color32::from_rgb(110, 220, 255))
+                                        .strong()
+                                } else {
+                                    RichText::new("⚖️ 동일").color(Color32::LIGHT_GRAY)
+                                }
+                            };
+                            ui.label(rec_label).on_hover_text(&row.recommendation);
+
+                            ui.end_row();
+                        }
+                    });
+            });
+
+        if let Some(target_name) = jump_to_recipe {
+            if let Some(rec) = self.all_recipes.iter().find(|r| r.display_name == target_name).cloned() {
+                self.selected_recipe = Some(rec);
+                self.craft_view_mode = CraftViewMode::SingleDetail;
+                self.recalculate_cost();
+            }
+        }
     }
 
     /// 필터 조건에 맞는 첫 번째 레시피 선택

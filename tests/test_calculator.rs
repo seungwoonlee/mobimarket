@@ -220,6 +220,108 @@ async fn test_zero_cost_peridot_treated_as_zero_deca_without_warning() {
     assert_eq!(res_with_snapshot.total_material_cost, 500);
 }
 
+#[tokio::test]
+async fn test_opportunity_cost_sell_materials_vs_craft_and_all_recipes() {
+    let dir = tempdir().unwrap();
+    let db = Database::new(&dir.path().join("test_opp_cost.db")).unwrap();
+
+    // Case 1: 완제품 1,000데카, 재료 시세 합 1,050데카(전량 구매 시 50 손해)이지만
+    // 재료를 100% 보유 중이면 매각 시 10% 수수료 공제 후 945데카만 회수 가능 -> 직접 제작이 55데카 유리!
+    let ing1 = serde_json::json!([
+        { "DisplayName": "특급 가죽", "Required": 10, "Owned": 0 }
+    ])
+    .to_string();
+    db.upsert_recipe("잔영의 갑옷ZZ", 1, 100.0, 0.0, &ing1).await.unwrap();
+    db.insert_snapshot("잔영의 갑옷ZZ", None, None, None, 1000, true).await.unwrap();
+    db.insert_snapshot("특급 가죽", None, None, None, 105, true).await.unwrap();
+
+    // Case 2: 완제품 1,000데카, 재료 시세 합 1,200데카 -> 보유 재료 매각 시 수수료 10% 후 1,080데카!
+    // 보유 재료만 팔아도 완제품(1,000) 구매 가능하고 +80데카 잉여 -> 매각 후 완제품 구매 강력 추천!
+    let ing2 = serde_json::json!([
+        { "DisplayName": "특급 실크", "Required": 10, "Owned": 0 }
+    ])
+    .to_string();
+    db.upsert_recipe("잔영의 전투복ZZ", 1, 100.0, 0.0, &ing2).await.unwrap();
+    db.insert_snapshot("잔영의 전투복ZZ", None, None, None, 1000, true).await.unwrap();
+    db.insert_snapshot("특급 실크", None, None, None, 120, true).await.unwrap();
+
+    // Case 3: 일부 보유 + 일부 부족 (완제품 2,000 / 재료 A 10개*180 보유 / 재료 B 5개*100 부족)
+    // 직접 제작 시 추가 지출 = 500, 매각 후 구매 시 순부담 = 2000 - round(1800*0.9)=1620 -> 380!
+    // 매각 후 구매가 120데카 더 저렴!
+    let ing3 = serde_json::json!([
+        { "DisplayName": "백금강괴", "Required": 10, "Owned": 0 },
+        { "DisplayName": "운철괴", "Required": 5, "Owned": 0 }
+    ])
+    .to_string();
+    db.upsert_recipe("잔영의 숏소드ZZ", 1, 100.0, 0.0, &ing3).await.unwrap();
+    db.insert_snapshot("잔영의 숏소드ZZ", None, None, None, 2000, true).await.unwrap();
+    db.insert_snapshot("백금강괴", None, None, None, 180, true).await.unwrap();
+    db.insert_snapshot("운철괴", None, None, None, 100, true).await.unwrap();
+
+    let owned = vec![
+        OwnedItem {
+            location: "inventory".to_string(),
+            display_name: "특급 가죽".to_string(),
+            count: 10,
+            is_locked: false,
+        },
+        OwnedItem {
+            location: "character_storage".to_string(),
+            display_name: "특급 실크".to_string(),
+            count: 20, // 투입분 10개보다 많음 -> used_owned=10, total_owned=20
+            is_locked: false,
+        },
+        OwnedItem {
+            location: "account_storage".to_string(),
+            display_name: "백금강괴".to_string(),
+            count: 10,
+            is_locked: false,
+        },
+    ];
+
+    let calc = CraftCalculator::new(db.clone());
+
+    // 검증 1: 수수료 역전 케이스
+    let r1 = calc.calculate("잔영의 갑옷ZZ", 1, &owned, true, true, false).await.unwrap();
+    assert_eq!(r1.owned_materials_sell_gross, 1050);
+    assert_eq!(r1.owned_materials_sell_net, 945);
+    assert_eq!(r1.buy_after_selling_net_cost, Some(55));
+    assert_eq!(r1.user_inventory_gap_cost, 0);
+    assert_eq!(r1.craft_advantage_over_sell_buy, Some(55));
+    assert!(!r1.can_buy_with_used_owned);
+    assert!(r1.recommendation.contains("직접 제작 추천"));
+
+    // 검증 2: 보유 재료 매각만으로 완제품 구매 + 잉여금
+    let r2 = calc.calculate("잔영의 전투복ZZ", 1, &owned, true, true, false).await.unwrap();
+    assert_eq!(r2.owned_materials_sell_net, 1080);
+    assert_eq!(r2.all_owned_materials_sell_net, 2160);
+    assert_eq!(r2.buy_after_selling_net_cost, Some(-80));
+    assert!(r2.can_buy_with_used_owned);
+    assert!(r2.can_buy_with_all_owned);
+    assert_eq!(r2.owned_sell_surplus, Some(80));
+    assert_eq!(r2.craft_advantage_over_sell_buy, Some(-80));
+    assert!(r2.recommendation.contains("보유 재료만 팔아도 구매 가능"));
+
+    // 검증 3: 일부 보유 + 일부 부족 시 매각 후 구매 유리
+    let r3 = calc.calculate("잔영의 숏소드ZZ", 1, &owned, true, true, false).await.unwrap();
+    assert_eq!(r3.owned_materials_sell_net, 1620);
+    assert_eq!(r3.user_inventory_gap_cost, 500);
+    assert_eq!(r3.buy_after_selling_net_cost, Some(380));
+    assert_eq!(r3.craft_advantage_over_sell_buy, Some(-120));
+    assert!(r3.recommendation.contains("매각 후 마켓 완제품 구매"));
+
+    // 검증 4: 전품목 일괄 비교
+    let recipes = db.get_recipes(None).await.unwrap();
+    let all_rows = calc.evaluate_all_recipes(&recipes, 1, &owned, true, true, false).await.unwrap();
+    assert_eq!(all_rows.len(), 3);
+    let row_armor = all_rows.iter().find(|r| r.display_name == "잔영의 갑옷ZZ").unwrap();
+    let row_cloth = all_rows.iter().find(|r| r.display_name == "잔영의 전투복ZZ").unwrap();
+    let row_sword = all_rows.iter().find(|r| r.display_name == "잔영의 숏소드ZZ").unwrap();
+    assert_eq!(row_armor.status_code, 1);
+    assert_eq!(row_cloth.status_code, 3);
+    assert_eq!(row_sword.status_code, 2);
+}
+
 
 
 
