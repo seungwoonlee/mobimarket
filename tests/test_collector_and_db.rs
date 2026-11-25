@@ -41,3 +41,34 @@ async fn test_database_batch_snapshots_merge_zz_variants() {
     let history = db.get_snapshot_history("잔영의 숏소드ZZ", 10).await.unwrap();
     assert_eq!(history.len(), 2);
 }
+
+#[tokio::test]
+async fn test_database_cleans_stale_default_seeds_preserves_user_items() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test_stale_seeds.db");
+
+    // 1. DB 초기화 후 과거 버전 '기본' 유령 품목과 '사용자 추가' 품목을 직접 삽입 시뮬레이션
+    {
+        let _db = Database::new(&db_path).unwrap();
+    }
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO monitored_items (item_name, group_name) VALUES ('단단한 무쇠괴', '기본')",
+            [],
+        )
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO monitored_items (item_name, group_name) VALUES ('사용자커스텀품목', '사용자 추가')",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn);
+
+    // 2. Database::new 재기동 시 폐기된 '기본' 시드는 삭제되고 '사용자 추가'는 보존되어야 함
+    let db = Database::new(&db_path).unwrap();
+    let items = db.get_monitored_items().await.unwrap();
+    assert!(!items.contains(&"단단한 무쇠괴".to_string()));
+    assert!(items.contains(&"사용자커스텀품목".to_string()));
+}

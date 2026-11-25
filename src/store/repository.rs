@@ -95,10 +95,27 @@ impl Database {
             "#,
         )?;
 
-        // 기본 모니터링 품목 초기 시드 등록 (KST 기준 타임스탬프)
+        // 기본 모니터링 품목 초기 시드 등록 및 폐기된 과거 기본 시드 자동 정리 (KST 기준 타임스탬프)
         let now_local = local_now_str();
         {
             let tx = conn.transaction()?;
+            let current_defaults: HashSet<&str> = crate::config::DEFAULT_MONITORED_NAMES.iter().copied().collect();
+
+            // 과거 버전(v1.2.0 등)에서 '기본' 시드로 등록되었다가 config에서 제거된 유령 품목(예: 단단한 무쇠괴) 정리
+            let stale_default_items: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT item_name FROM monitored_items WHERE group_name = '기본'")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.filter_map(|r| r.ok())
+                    .filter(|name| !current_defaults.contains(name.as_str()))
+                    .collect()
+            };
+            for stale in stale_default_items {
+                tx.execute(
+                    "DELETE FROM monitored_items WHERE item_name = ?1 AND group_name = '기본'",
+                    params![stale],
+                )?;
+            }
+
             for &name in crate::config::DEFAULT_MONITORED_NAMES {
                 let grp = if crate::config::GROUP_MATERIALS.contains(&name) {
                     "재료"
