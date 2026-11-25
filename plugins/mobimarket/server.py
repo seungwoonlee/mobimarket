@@ -223,6 +223,24 @@ def tool_calculate_craft(recipe_name: str, success_override: float = None) -> di
     net_profit = expected_revenue - total_mat_cost
     roi = (net_profit / total_mat_cost * 100.0) if total_mat_cost > 0 else 0.0
 
+    sell_materials_net = round(total_mat_cost * (1.0 - fee_rate))
+    product_buy_cost = round(market_price * produced)
+    # 전량 보유 가정 시 직접 제작 추가 지출은 0이므로, (완제품가 - 재료 매각 실수령)이 직접 제작 유리액
+    craft_advantage_if_owned = product_buy_cost - sell_materials_net
+    if product_buy_cost > total_mat_cost:
+        recommended_action = "craft"
+    elif product_buy_cost < total_mat_cost:
+        recommended_action = "buy"
+    else:
+        recommended_action = "equal"
+
+    if craft_advantage_if_owned > 0:
+        recommended_action_if_owned = "craft"
+    elif craft_advantage_if_owned < 0:
+        recommended_action_if_owned = "sell_materials_and_buy"
+    else:
+        recommended_action_if_owned = "equal"
+
     return {
         "recipe_name": matched_name,
         "produced_per_craft": produced,
@@ -235,6 +253,15 @@ def tool_calculate_craft(recipe_name: str, success_override: float = None) -> di
         "roi_percent": round(roi, 1),
         "is_profitable": net_profit > 0,
         "missing_prices": [],
+        "craft_vs_buy": {
+            "buy_product_price": product_buy_cost,
+            "craft_total_material_cost": total_mat_cost,
+            "sell_materials_net_if_owned": sell_materials_net,
+            "craft_advantage_over_sell_buy_if_owned": craft_advantage_if_owned,
+            "recommended_action": recommended_action,
+            "recommended_action_if_owned": recommended_action_if_owned,
+            "net_saving": product_buy_cost - total_mat_cost,
+        },
         "ingredients": ing_details,
     }
 

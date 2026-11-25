@@ -286,6 +286,7 @@ impl Database {
     }
 
     /// 특정 아이템의 최신 스냅샷 조회 (ZZ 양방향 단일 쿼리 지원)
+    #[allow(dead_code)]
     pub async fn get_latest_snapshot(&self, item_name: &str) -> Result<Option<SnapshotRecord>> {
         let name = item_name.to_string();
         let alt = alt_zz_name(&name);
@@ -341,6 +342,37 @@ impl Database {
                 list.push(r?);
             }
             Ok(list)
+        })
+        .await
+    }
+
+    /// 모든 아이템의 최신 최저가 맵 조회 (scraped_at/id 최신순 정렬 + ZZ 양방향 인덱싱)
+    pub async fn get_all_latest_price_map(&self) -> Result<HashMap<String, i64>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT item_name, min_unit_price
+                FROM (
+                    SELECT
+                        item_name, min_unit_price, scraped_at, id,
+                        ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY scraped_at DESC, id DESC) AS rn
+                    FROM market_snapshots
+                )
+                WHERE rn = 1
+                ORDER BY scraped_at ASC, id ASC
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut map = HashMap::new();
+            for r in rows {
+                let (name, price) = r?;
+                let alt = alt_zz_name(&name);
+                map.insert(alt, price);
+                map.insert(name, price);
+            }
+            Ok(map)
         })
         .await
     }
